@@ -4,7 +4,6 @@ import { formatCurrency } from '../utils/helpers';
 import { Trophy, Users, XCircle, Home, Download } from 'lucide-react';
 interface SummaryProps {
   standalone?: boolean;
-  onBack?: () => void;
 }
 
 const Summary = ({ standalone = true }: SummaryProps) => {
