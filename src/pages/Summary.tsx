@@ -7,7 +7,7 @@ interface SummaryProps {
   onBack?: () => void;
 }
 
-const Summary = ({ standalone = true, onBack }: SummaryProps) => {
+const Summary = ({ standalone = true }: SummaryProps) => {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
   const { players, teams, loading } = useRoom(roomId || '');

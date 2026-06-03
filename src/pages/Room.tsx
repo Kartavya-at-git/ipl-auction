@@ -10,7 +10,7 @@ import Chat from '../components/Chat';
 import ReAuctionSetup from '../components/ReAuctionSetup';
 import TeamSelection from '../components/TeamSelection';
 import Summary from './Summary';
-import { Loader2, LogOut, Settings, Gavel, Users, Trophy, MessageCircle, X, UserPlus, Info } from 'lucide-react';
+import { Loader2, LogOut, Gavel, Users, Trophy, MessageCircle, X, Info } from 'lucide-react';
 
 const Room = () => {
   const { roomId } = useParams<{ roomId: string }>();
