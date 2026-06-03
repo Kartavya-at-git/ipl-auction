@@ -141,7 +141,7 @@ const Room = () => {
     return (
       <div className="min-h-screen flex flex-col bg-ipl-bg text-white">
         {room.status !== 'completed' && <Header />}
-        <Summary standalone={room.status === 'completed'} onBack={() => setActiveTab('auction')} />
+        <Summary standalone={room.status === 'completed'} />
         {room.status !== 'completed' && <BottomNav />}
       </div>
     );
