@@ -20,7 +20,7 @@ const Room = () => {
   const [hasEnteredAuction, setHasEnteredAuction] = React.useState(false);
   const { user, loading: authLoading } = useAuth();
   const { room, players, activePlayer, teams, participants, recentBids, loading: roomLoading } = useRoom(roomId?.toUpperCase() || '');
-  const [hasEnteredAuction, setHasEnteredAuction] = React.useState(false);
+  
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -55,7 +55,9 @@ const Room = () => {
   const isHost = user?.uid === room.hostId;
   const currentParticipant = participants.find(p => p.uid === user?.uid);
   const userTeam = teams.find(t => t.ownerUid === user?.uid);
-  const needsTeam = !isHost && !userTeam;
+  
+  // Show team selection if: not host, room is active/setup, and either no team picked or hasn't clicked continue
+  const showTeamSelection = !isHost && room.status !== 'waiting' && (!userTeam || !hasEnteredAuction);
 
   // Header Component
   const Header = () => (
@@ -127,12 +129,18 @@ const Room = () => {
   );
 
   // 1. Forced Team Selection for Participants
-  if (needsTeam && room.status !== 'waiting') {
+  if (showTeamSelection) {
     return (
       <div className="min-h-screen flex flex-col bg-ipl-bg text-white">
         <Header />
         <main className="flex-1 p-4 md:p-8">
-          <TeamSelection room={room} teams={teams} participants={participants} currentUserUid={user?.uid || ''} />
+          <TeamSelection 
+            room={room} 
+            teams={teams} 
+            participants={participants} 
+            currentUserUid={user?.uid || ''} 
+            onEnterAuction={() => setHasEnteredAuction(true)} 
+          />
         </main>
       </div>
     );

@@ -9,6 +9,7 @@ interface TeamSelectionProps {
   teams: Team[];
   participants: Participant[];
   currentUserUid: string;
+  onEnterAuction?: () => void;
 }
 
 export const IPL_TEAMS = [

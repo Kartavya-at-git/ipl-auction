@@ -24,9 +24,17 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   const [sidebarTab, setSidebarTab] = useState<'status' | 'set'>('status');
 
   const userTeam = teams.find(t => t.ownerUid === currentUserUid);
-  const nextBidAmount = getNextBid(currentPlayer.currentBid || currentPlayer.basePrice);
+  const nextBidAmount = currentPlayer.highestBidderTeamId 
+    ? getNextBid(currentPlayer.currentBid) 
+    : currentPlayer.basePrice;
   const highestBidderTeam = teams.find(t => t.id === currentPlayer.highestBidderTeamId);
   const currentSetPlayers = players.filter(p => p.category === currentPlayer.category);
+
+  // Squad Limits
+  const userTeamPlayers = userTeam ? players.filter(p => p.teamId === userTeam.id) : [];
+  const userOsCount = userTeamPlayers.filter(p => p.country?.toLowerCase() !== 'india').length;
+  const isOverOSLimit = currentPlayer.country?.toLowerCase() !== 'india' && userOsCount >= 8;
+  const isOverSquadLimit = userTeamPlayers.length >= 25;
 
   // Timer Logic
   useEffect(() => {
@@ -41,7 +49,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       const diff = Math.max(0, Math.floor((end - now) / 1000));
       setTimeLeft(diff);
 
-      if (diff === 0 && isHost) {
+      if (diff === 0 && isHost && room.status === 'active') {
         clearInterval(interval);
         handleTimerEnd();
       }
@@ -76,6 +84,16 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       return;
     }
 
+    if (isOverSquadLimit) {
+      setError('Squad limit of 25 players reached');
+      return;
+    }
+
+    if (isOverOSLimit) {
+      setError('Overseas player limit of 8 reached');
+      return;
+    }
+
     if (room.status !== 'active') {
       setError('Auction is paused');
       return;
@@ -88,36 +106,42 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       await runTransaction(db, async (transaction) => {
         const playerRef = doc(db, 'rooms', room.id, 'players', currentPlayer.id);
         const roomRef = doc(db, 'rooms', room.id);
+        const teamRef = doc(db, 'rooms', room.id, 'teams', userTeam.id);
         
         const playerSnap = await transaction.get(playerRef);
         if (!playerSnap.exists()) throw new Error("Player not found");
         
+        const teamSnap = await transaction.get(teamRef);
+        if (!teamSnap.exists()) throw new Error("Team not found");
+
         const playerData = playerSnap.data() as Player;
+        const teamData = teamSnap.data() as Team;
+
         if (playerData.status !== 'current') throw new Error("Auction not active for this player");
+        if (playerData.highestBidderTeamId === userTeam.id) throw new Error("Already highest bidder");
 
         // Calculate next bid again inside transaction
-        const currentNextBid = getNextBid(playerData.currentBid || playerData.basePrice);
+        const currentNextBid = playerData.highestBidderTeamId 
+          ? getNextBid(playerData.currentBid) 
+          : playerData.basePrice;
 
-        // Record the bid
-        const bidId = `bid_${Date.now()}_${currentUserUid}`;
-        const bidRef = doc(db, 'rooms', room.id, 'bids', bidId);
-        
-        transaction.set(bidRef, {
-          amount: currentNextBid,
-          teamId: userTeam.id,
-          playerId: currentPlayer.id,
-          timestamp: serverTimestamp()
-        });
+        // Secure server-side purse check
+        if (teamData.purseBalance < currentNextBid) {
+          throw new Error("Insufficient purse balance");
+        }
 
-        // Update player
+        const newTimer = Date.now() + (room.settings.timerDuration * 1000);
+
+        // ATOMIC UPDATE: Write everything to the Player document
         transaction.update(playerRef, {
           currentBid: currentNextBid,
-          highestBidderTeamId: userTeam.id
-        });
-
-        // Update room timer
-        transaction.update(roomRef, {
-          timerEndTime: Date.now() + (room.settings.timerDuration * 1000)
+          highestBidderTeamId: userTeam.id,
+          timerEndTime: newTimer,
+          bidHistory: arrayUnion({
+            amount: currentNextBid,
+            teamId: userTeam.id,
+            timestamp: Date.now()
+          })
         });
       });
     } catch (err: any) {
