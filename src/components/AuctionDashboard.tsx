@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { Room, Player, Team } from '../types';
-import { doc, runTransaction, serverTimestamp, updateDoc, increment } from 'firebase/firestore';
+import { doc, runTransaction, updateDoc, increment, arrayUnion } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { getNextBid } from '../utils/bidding';
 import { formatCurrency } from '../utils/helpers';
@@ -22,6 +22,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [sidebarTab, setSidebarTab] = useState<'status' | 'set'>('status');
+  const timerEndProcessed = useRef<number | null>(null);
 
   const userTeam = teams.find(t => t.ownerUid === currentUserUid);
   const nextBidAmount = currentPlayer.highestBidderTeamId 
@@ -51,7 +52,10 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
 
       if (diff === 0 && isHost && room.status === 'active') {
         clearInterval(interval);
-        handleTimerEnd();
+        if (timerEndProcessed.current !== end) {
+          timerEndProcessed.current = end;
+          handleTimerEnd();
+        }
       }
     }, 100);
 
@@ -105,7 +109,6 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     try {
       await runTransaction(db, async (transaction) => {
         const playerRef = doc(db, 'rooms', room.id, 'players', currentPlayer.id);
-        const roomRef = doc(db, 'rooms', room.id);
         const teamRef = doc(db, 'rooms', room.id, 'teams', userTeam.id);
         
         const playerSnap = await transaction.get(playerRef);
@@ -125,9 +128,12 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
           ? getNextBid(playerData.currentBid) 
           : playerData.basePrice;
 
-        // Secure server-side purse check
+        // Secure server-side purse and squad check
         if (teamData.purseBalance < currentNextBid) {
           throw new Error("Insufficient purse balance");
+        }
+        if (teamData.playerCount >= 25) {
+          throw new Error("Squad limit reached");
         }
 
         const newTimer = Date.now() + (room.settings.timerDuration * 1000);
@@ -160,7 +166,13 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       await runTransaction(db, async (transaction) => {
         const playerRef = doc(db, 'rooms', room.id, 'players', currentPlayer.id);
         const teamRef = doc(db, 'rooms', room.id, 'teams', highestBidderTeam.id);
+        const roomRef = doc(db, 'rooms', room.id);
         
+        // Firestore transactions MUST perform all reads before writes
+        await transaction.get(playerRef);
+        await transaction.get(teamRef);
+        await transaction.get(roomRef);
+
         transaction.update(playerRef, {
           status: 'sold',
           soldPrice: currentPlayer.currentBid,
@@ -172,7 +184,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
           playerCount: increment(1)
         });
 
-        transaction.update(doc(db, 'rooms', room.id), {
+        transaction.update(roomRef, {
           timerEndTime: null,
           status: 'paused' // Temporarily pause during transition
         });
@@ -381,7 +393,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </button>
                 <button 
                   onClick={handleNextPlayer}
-                  disabled={!!highestBidderTeam || loading}
+                  disabled={(currentPlayer.status === 'current' && !!highestBidderTeam) || loading}
                   className="flex flex-col items-center justify-center gap-1 p-4 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all disabled:opacity-20"
                 >
                   <SkipForward size={24} />

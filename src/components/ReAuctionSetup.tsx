@@ -36,7 +36,10 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
   }, [room.timerEndTime, isHost]);
 
   const toggleNomination = async (player: Player) => {
-    if (!userTeam) return;
+    if (!userTeam && !isHost) return;
+
+    // Prevent non-hosts from un-nominating players
+    if (!isHost && player.isNominated) return;
 
     const playerRef = doc(db, 'rooms', room.id, 'players', player.id);
     await updateDoc(playerRef, {

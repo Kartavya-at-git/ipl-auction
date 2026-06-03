@@ -25,7 +25,7 @@ export const IPL_TEAMS = [
   { id: 'PBKS', name: 'Punjab Kings', color: '#DD1F2D' },
 ];
 
-const TeamSelection = ({ room, teams, participants, currentUserUid }: TeamSelectionProps) => {
+const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAuction }: TeamSelectionProps) => {
   const [error, setError] = useState('');
   const [selectingId, setSelectingId] = useState<string | null>(null);
   const userTeam = teams.find(t => t.ownerUid === currentUserUid);
@@ -85,7 +85,13 @@ const TeamSelection = ({ room, teams, participants, currentUserUid }: TeamSelect
         </div>
 
         <button
-          onClick={() => window.location.reload()}
+          onClick={() => {
+            if (onEnterAuction) {
+              onEnterAuction();
+            } else {
+              window.location.reload();
+            }
+          }}
           className="w-full py-4 bg-ipl-gold text-ipl-navy font-black rounded-xl hover:bg-ipl-gold/90 transition-all shadow-lg"
         >
           ENTER AUCTION ROOM
@@ -100,6 +106,18 @@ const TeamSelection = ({ room, teams, participants, currentUserUid }: TeamSelect
         <ShieldAlert className="text-red-500 mx-auto" size={48} />
         <h2 className="text-xl font-bold text-white">Auction is Full</h2>
         <p className="text-ipl-gold/40 text-sm">All 10 IPL franchises have been claimed. You can still watch the auction as a spectator.</p>
+        <button
+          onClick={() => {
+            if (onEnterAuction) {
+              onEnterAuction();
+            } else {
+              window.location.reload();
+            }
+          }}
+          className="w-full mt-4 py-3 bg-white/10 text-white font-bold rounded-lg hover:bg-white/20 transition-colors"
+        >
+          Continue as Spectator
+        </button>
       </div>
     );
   }
