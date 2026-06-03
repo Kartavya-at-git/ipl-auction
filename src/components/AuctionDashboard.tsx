@@ -1,0 +1,526 @@
+import { useState, useEffect } from 'react';
+import type { Room, Player, Team } from '../types';
+import { doc, runTransaction, serverTimestamp, updateDoc, increment } from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { getNextBid } from '../utils/bidding';
+import { formatCurrency } from '../utils/helpers';
+import { Gavel, Timer, CheckCircle, XCircle, SkipForward, Pause, Play, Users, History, AlertTriangle, ListFilter } from 'lucide-react';
+import type { Bid } from '../types';
+
+interface AuctionDashboardProps {
+  room: Room;
+  currentPlayer: Player;
+  players: Player[];
+  teams: Team[];
+  recentBids: Bid[];
+  isHost: boolean;
+  currentUserUid: string;
+}
+
+const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isHost, currentUserUid }: AuctionDashboardProps) => {
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [sidebarTab, setSidebarTab] = useState<'status' | 'set'>('status');
+
+  const userTeam = teams.find(t => t.ownerUid === currentUserUid);
+  const nextBidAmount = getNextBid(currentPlayer.currentBid || currentPlayer.basePrice);
+  const highestBidderTeam = teams.find(t => t.id === currentPlayer.highestBidderTeamId);
+  const currentSetPlayers = players.filter(p => p.category === currentPlayer.category);
+
+  // Timer Logic
+  useEffect(() => {
+    if (room.status !== 'active' || !room.timerEndTime) {
+      setTimeLeft(0);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const end = room.timerEndTime!;
+      const diff = Math.max(0, Math.floor((end - now) / 1000));
+      setTimeLeft(diff);
+
+      if (diff === 0 && isHost) {
+        clearInterval(interval);
+        handleTimerEnd();
+      }
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [room.status, room.timerEndTime, isHost]);
+
+  const handleTimerEnd = async () => {
+    if (!isHost) return;
+
+    if (highestBidderTeam) {
+      await handleSold();
+    } else {
+      await handleUnsold();
+    }
+
+    // Short delay before moving to next player automatically
+    setTimeout(async () => {
+      await handleNextPlayer();
+    }, 2000);
+  };
+
+  const handlePlaceBid = async () => {
+    if (!userTeam) {
+      setError('You must belong to a team to bid');
+      return;
+    }
+
+    if (userTeam.purseBalance < nextBidAmount) {
+      setError('Insufficient purse balance');
+      return;
+    }
+
+    if (room.status !== 'active') {
+      setError('Auction is paused');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const playerRef = doc(db, 'rooms', room.id, 'players', currentPlayer.id);
+        const roomRef = doc(db, 'rooms', room.id);
+        
+        const playerSnap = await transaction.get(playerRef);
+        if (!playerSnap.exists()) throw new Error("Player not found");
+        
+        const playerData = playerSnap.data() as Player;
+        if (playerData.status !== 'current') throw new Error("Auction not active for this player");
+
+        // Calculate next bid again inside transaction
+        const currentNextBid = getNextBid(playerData.currentBid || playerData.basePrice);
+
+        // Record the bid
+        const bidId = `bid_${Date.now()}_${currentUserUid}`;
+        const bidRef = doc(db, 'rooms', room.id, 'bids', bidId);
+        
+        transaction.set(bidRef, {
+          amount: currentNextBid,
+          teamId: userTeam.id,
+          playerId: currentPlayer.id,
+          timestamp: serverTimestamp()
+        });
+
+        // Update player
+        transaction.update(playerRef, {
+          currentBid: currentNextBid,
+          highestBidderTeamId: userTeam.id
+        });
+
+        // Update room timer
+        transaction.update(roomRef, {
+          timerEndTime: Date.now() + (room.settings.timerDuration * 1000)
+        });
+      });
+    } catch (err: any) {
+      setError(err.message || 'Bid failed');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSold = async () => {
+    if (!highestBidderTeam) return;
+
+    setLoading(true);
+    try {
+      await runTransaction(db, async (transaction) => {
+        const playerRef = doc(db, 'rooms', room.id, 'players', currentPlayer.id);
+        const teamRef = doc(db, 'rooms', room.id, 'teams', highestBidderTeam.id);
+        
+        transaction.update(playerRef, {
+          status: 'sold',
+          soldPrice: currentPlayer.currentBid,
+          teamId: highestBidderTeam.id
+        });
+
+        transaction.update(teamRef, {
+          purseBalance: increment(-currentPlayer.currentBid),
+          playerCount: increment(1)
+        });
+
+        transaction.update(doc(db, 'rooms', room.id), {
+          timerEndTime: null,
+          status: 'paused' // Temporarily pause during transition
+        });
+      });
+
+      // Auto-advance after delay
+      setTimeout(async () => {
+        await handleNextPlayer();
+      }, 2000);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUnsold = async () => {
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, 'rooms', room.id, 'players', currentPlayer.id), {
+        status: 'unsold'
+      });
+      await updateDoc(doc(db, 'rooms', room.id), {
+        timerEndTime: null,
+        status: 'paused'
+      });
+
+      // Auto-advance after delay
+      setTimeout(async () => {
+        await handleNextPlayer();
+      }, 2000);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleNextPlayer = async () => {
+    const isReAuction = room.status === 're-auction-active';
+    const availablePlayers = isReAuction 
+      ? players.filter(p => p.status === 'unsold' && p.isNominated)
+      : players.filter(p => p.status === 'upcoming' || p.status === 'current');
+    
+    // Find next player in the current context
+    const currentIndex = availablePlayers.findIndex(p => p.id === currentPlayer.id);
+    const nextPlayer = availablePlayers[currentIndex + 1];
+
+    if (!nextPlayer) {
+      if (room.status === 'active') {
+        // Main auction ended, move to Re-Auction Setup
+        await updateDoc(doc(db, 'rooms', room.id), {
+          status: 're-auction-setup',
+          currentPlayerId: null,
+          timerEndTime: Date.now() + (5 * 60 * 1000) // 5 Minutes
+        });
+      } else {
+        // Re-auction ended, complete room
+        await updateDoc(doc(db, 'rooms', room.id), {
+          status: 'completed',
+          currentPlayerId: null
+        });
+      }
+      return;
+    }
+
+    await updateDoc(doc(db, 'rooms', room.id), {
+      currentPlayerId: nextPlayer.id,
+      status: 'active',
+      timerEndTime: Date.now() + (room.settings.timerDuration * 1000),
+      auctionNumber: increment(1)
+    });
+
+    await updateDoc(doc(db, 'rooms', room.id, 'players', nextPlayer.id), {
+      status: 'current',
+      currentBid: nextPlayer.basePrice
+    });
+  };
+
+  const togglePause = async () => {
+    const newStatus = room.status === 'active' ? 'paused' : 'active';
+    const newTimer = newStatus === 'active' ? Date.now() + (room.settings.timerDuration * 1000) : null;
+    
+    await updateDoc(doc(db, 'rooms', room.id), {
+      status: newStatus,
+      timerEndTime: newTimer
+    });
+  };
+
+  return (
+    <div className="max-w-6xl mx-auto space-y-6 pb-24">
+      <div className="grid lg:grid-cols-12 gap-6">
+        {/* Main Player Card */}
+        <div className="lg:col-span-8 space-y-6">
+          <div className="bg-ipl-navy border-2 border-ipl-gold/30 rounded-2xl overflow-hidden shadow-2xl relative">
+            {/* Player Header */}
+            <div className="bg-gradient-to-r from-ipl-navy to-ipl-blue p-6 flex items-center justify-between border-b border-ipl-gold/20">
+              <div className="space-y-1">
+                <div className="text-ipl-gold/60 text-xs font-bold uppercase tracking-widest">{currentPlayer.role || 'Player'} • {currentPlayer.country || 'International'}</div>
+                <h2 className="text-4xl font-black text-white italic tracking-tighter uppercase">{currentPlayer.name}</h2>
+              </div>
+              <div className="text-right">
+                <div className="text-ipl-gold/40 text-[10px] uppercase font-bold mb-1">Base Price</div>
+                <div className="text-2xl font-black text-ipl-gold">{formatCurrency(currentPlayer.basePrice)}</div>
+              </div>
+            </div>
+
+            {/* Auction Status Area */}
+            <div className="p-8 grid md:grid-cols-2 gap-8 items-center bg-ipl-bg/20">
+              <div className="space-y-6">
+                <div className="space-y-1">
+                  <div className="text-ipl-gold/40 text-xs font-bold uppercase tracking-wider">Current Bid</div>
+                  <div className={`text-6xl font-black italic tracking-tighter ${highestBidderTeam ? 'text-white' : 'text-ipl-gold/20'}`}>
+                    {currentPlayer.currentBid ? formatCurrency(currentPlayer.currentBid) : 'NO BID'}
+                  </div>
+                </div>
+
+                {highestBidderTeam && (
+                  <div className="flex items-center gap-3 animate-in fade-in slide-in-from-left-4">
+                    <div className="w-12 h-12 rounded-lg flex items-center justify-center font-bold text-xl text-white shadow-lg" style={{ backgroundColor: highestBidderTeam.color }}>
+                      {highestBidderTeam.id}
+                    </div>
+                    <div>
+                      <div className="text-ipl-gold/40 text-[10px] uppercase font-bold">Leading Bidder</div>
+                      <div className="text-white font-black uppercase text-lg">{highestBidderTeam.name}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-col items-center justify-center space-y-4">
+                <div className={`relative w-40 h-40 rounded-full border-4 flex flex-col items-center justify-center transition-all duration-300 ${
+                  timeLeft <= 5 ? 'border-red-500 text-red-500 animate-pulse' : 'border-ipl-gold text-ipl-gold'
+                }`}>
+                  <Timer size={24} className="mb-1" />
+                  <div className="text-5xl font-black font-mono">{timeLeft}s</div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest mt-1">Remaining</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Status Overlay (Sold/Unsold) */}
+            {(currentPlayer.status === 'sold' || currentPlayer.status === 'unsold') && (
+              <div className="absolute inset-0 z-50 flex items-center justify-center bg-ipl-navy/60 backdrop-blur-sm animate-in fade-in zoom-in duration-300">
+                <div className={`text-8xl font-black italic uppercase tracking-tighter transform -rotate-12 border-8 px-8 py-2 rounded-xl shadow-2xl animate-bounce ${
+                  currentPlayer.status === 'sold' ? 'text-green-500 border-green-500' : 'text-red-500 border-red-500'
+                }`}>
+                  {currentPlayer.status}
+                </div>
+              </div>
+            )}
+
+            {/* Bidding Controls */}
+            {!isHost && (
+              <div className="p-6 bg-ipl-navy border-t border-ipl-gold/20">
+                {error && <div className="mb-4 text-center text-red-400 text-sm font-bold bg-red-400/10 p-2 rounded border border-red-400/20">{error}</div>}
+                
+                <button
+                  onClick={handlePlaceBid}
+                  disabled={loading || room.status !== 'active' || userTeam?.purseBalance! < nextBidAmount}
+                  className="w-full group relative overflow-hidden bg-ipl-gold disabled:bg-gray-700 h-20 rounded-xl transition-all active:scale-95 shadow-lg"
+                >
+                  <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
+                  <div className="relative flex flex-col items-center justify-center">
+                    <div className="text-ipl-navy font-black text-2xl flex items-center gap-2 uppercase italic">
+                      <Gavel size={24} />
+                      BID {formatCurrency(nextBidAmount)}
+                    </div>
+                    <div className="text-ipl-navy/60 text-[10px] font-bold uppercase tracking-widest">
+                      {userTeam?.name} • Balance: {formatCurrency(userTeam?.purseBalance || 0)}
+                    </div>
+                  </div>
+                </button>
+              </div>
+            )}
+
+            {/* Host Action Overlay */}
+            {isHost && (
+              <div className="p-6 bg-ipl-navy border-t border-ipl-gold/20 grid grid-cols-2 md:grid-cols-4 gap-4">
+                <button 
+                  onClick={handleSold}
+                  disabled={!highestBidderTeam}
+                  className="flex flex-col items-center justify-center gap-1 p-4 bg-green-600/10 border border-green-600/30 rounded-xl text-green-500 hover:bg-green-600 hover:text-white transition-all disabled:opacity-20"
+                >
+                  <CheckCircle size={24} />
+                  <span className="text-xs font-black uppercase">Sold</span>
+                </button>
+                <button 
+                  onClick={handleUnsold}
+                  className="flex flex-col items-center justify-center gap-1 p-4 bg-red-600/10 border border-red-600/30 rounded-xl text-red-500 hover:bg-red-600 hover:text-white transition-all"
+                >
+                  <XCircle size={24} />
+                  <span className="text-xs font-black uppercase">Unsold</span>
+                </button>
+                <button 
+                  onClick={togglePause}
+                  className="flex flex-col items-center justify-center gap-1 p-4 bg-ipl-gold/10 border border-ipl-gold/30 rounded-xl text-ipl-gold hover:bg-ipl-gold hover:text-ipl-navy transition-all"
+                >
+                  {room.status === 'active' ? <Pause size={24} /> : <Play size={24} />}
+                  <span className="text-xs font-black uppercase">{room.status === 'active' ? 'Pause' : 'Resume'}</span>
+                </button>
+                <button 
+                  onClick={handleNextPlayer}
+                  className="flex flex-col items-center justify-center gap-1 p-4 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all"
+                >
+                  <SkipForward size={24} />
+                  <span className="text-xs font-black uppercase">Next</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Sidebar: Leaderboard & Recent Bids */}
+        <div className="lg:col-span-4 space-y-6">
+          {/* Sidebar Tabs */}
+          <div className="flex bg-ipl-navy border border-ipl-gold/20 rounded-lg overflow-hidden p-1 gap-1">
+            <button 
+              onClick={() => setSidebarTab('status')}
+              className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded transition-all ${sidebarTab === 'status' ? 'bg-ipl-gold text-ipl-navy' : 'text-ipl-gold/40 hover:bg-white/5'}`}
+            >
+              Franchise Status
+            </button>
+            <button 
+              onClick={() => setSidebarTab('set')}
+              className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded transition-all ${sidebarTab === 'set' ? 'bg-ipl-gold text-ipl-navy' : 'text-ipl-gold/40 hover:bg-white/5'}`}
+            >
+              Current Set
+            </button>
+          </div>
+
+          {sidebarTab === 'status' ? (
+            <>
+              {/* Recent Bids Feed */}
+              <div className="bg-ipl-navy border border-ipl-gold/20 rounded-xl p-4 space-y-4 shadow-xl">
+                <h3 className="text-sm font-black text-ipl-gold/60 uppercase tracking-widest flex items-center gap-2">
+                  <History size={16} />
+                  Recent Bids
+                </h3>
+                <div className="space-y-2 max-h-[180px] overflow-y-auto pr-2 custom-scrollbar">
+                  {recentBids.filter(b => b.playerId === currentPlayer.id).map((bid, index) => {
+                    const team = teams.find(t => t.id === bid.teamId);
+                    return (
+                      <div key={bid.id} className={`flex items-center justify-between p-2 rounded bg-ipl-bg/30 border border-white/5 animate-in slide-in-from-right duration-300`} style={{ opacity: 1 - (index * 0.15) }}>
+                        <div className="flex items-center gap-2">
+                          <div className="w-5 h-5 rounded text-[8px] flex items-center justify-center font-bold text-white" style={{ backgroundColor: team?.color }}>
+                            {team?.id}
+                          </div>
+                          <span className="text-[10px] font-bold text-white/60">{team?.name.split(' ').pop()}</span>
+                        </div>
+                        <span className="text-[11px] font-black text-ipl-gold">{formatCurrency(bid.amount)}</span>
+                      </div>
+                    );
+                  })}
+                  {recentBids.filter(b => b.playerId === currentPlayer.id).length === 0 && (
+                    <div className="text-center py-4 text-[10px] text-white/10 uppercase font-black italic">Waiting for opening bid...</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-ipl-navy border border-ipl-gold/20 rounded-xl p-4 space-y-4 shadow-xl">
+                <h3 className="text-sm font-black text-ipl-gold/60 uppercase tracking-widest flex items-center gap-2">
+                  <Users size={16} />
+                  Franchise Status
+                </h3>
+                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                  {teams.sort((a, b) => b.purseBalance - a.purseBalance).map((team) => {
+                    const teamPlayers = players.filter(p => p.teamId === team.id);
+                    const osCount = teamPlayers.filter(p => p.country?.toLowerCase() !== 'india').length;
+                    const isOverLimit = osCount > 8;
+                    const isLowPurse = team.purseBalance < currentPlayer.basePrice;
+
+                    return (
+                      <div key={team.id} className={`flex items-center justify-between p-2 rounded bg-ipl-bg/30 border ${isLowPurse ? 'border-red-500/20 opacity-50' : 'border-ipl-gold/5'}`}>
+                        <div className="flex items-center gap-2">
+                          <div className="w-6 h-6 rounded text-[10px] flex items-center justify-center font-bold text-white shadow-inner" style={{ backgroundColor: team.color }}>
+                            {team.id}
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[10px] font-bold text-white/80">{team.name.split(' ').pop()}</span>
+                            <div className="flex gap-1">
+                              <span className="text-[7px] text-ipl-gold/60 uppercase font-black">{teamPlayers.length} P</span>
+                              <span className={`text-[7px] uppercase font-black ${isOverLimit ? 'text-red-500' : 'text-white/30'}`}>
+                                {osCount} OS
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className={`text-[10px] font-mono font-black ${isLowPurse ? 'text-red-400' : 'text-ipl-gold'}`}>{formatCurrency(team.purseBalance)}</div>
+                          {isOverLimit && <AlertTriangle size={8} className="text-red-500 ml-auto" />}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          ) : (
+            /* Current Set View */
+            <div className="bg-ipl-navy border border-ipl-gold/20 rounded-xl p-4 space-y-4 shadow-xl flex-1 flex flex-col min-h-0">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-black text-ipl-gold/60 uppercase tracking-widest flex items-center gap-2">
+                  <ListFilter size={16} />
+                  Set: {currentPlayer.category || 'General'}
+                </h3>
+                <span className="text-[10px] font-bold text-white/20 uppercase bg-white/5 px-2 py-0.5 rounded">
+                  {currentSetPlayers.filter(p => p.status === 'sold').length} / {currentSetPlayers.length} Sold
+                </span>
+              </div>
+              
+              <div className="space-y-1.5 overflow-y-auto pr-2 custom-scrollbar max-h-[500px]">
+                {currentSetPlayers.map((player) => (
+                  <div 
+                    key={player.id} 
+                    className={`flex items-center justify-between p-2 rounded transition-all border ${
+                      player.id === currentPlayer.id 
+                        ? 'bg-ipl-gold/10 border-ipl-gold shadow-[0_0_10px_rgba(209,171,62,0.1)] scale-[1.02]' 
+                        : player.status === 'sold'
+                          ? 'bg-green-500/5 border-green-500/20 opacity-60'
+                          : player.status === 'unsold'
+                            ? 'bg-red-500/5 border-red-500/20 opacity-60'
+                            : 'bg-ipl-bg/30 border-white/5'
+                    }`}
+                  >
+                    <div className="flex flex-col min-w-0">
+                      <span className={`text-[10px] font-bold truncate ${player.id === currentPlayer.id ? 'text-white' : 'text-white/70'}`}>
+                        {player.name}
+                      </span>
+                      <span className="text-[8px] font-black uppercase text-white/30 tracking-tighter">
+                        {player.role} • {player.country}
+                      </span>
+                    </div>
+                    
+                    <div className="text-right shrink-0 ml-2">
+                      {player.status === 'sold' ? (
+                        <div className="flex flex-col items-end">
+                          <span className="text-[8px] font-black text-green-500 uppercase tracking-widest">SOLD</span>
+                          <span className="text-[9px] font-mono text-white/60">{formatCurrency(player.soldPrice || 0)}</span>
+                        </div>
+                      ) : player.status === 'unsold' ? (
+                        <span className="text-[8px] font-black text-red-500 uppercase tracking-widest">UNSOLD</span>
+                      ) : player.id === currentPlayer.id ? (
+                        <div className="flex items-center gap-1">
+                          <div className="w-1.5 h-1.5 rounded-full bg-ipl-gold animate-pulse" />
+                          <span className="text-[8px] font-black text-ipl-gold uppercase">CURRENT</span>
+                        </div>
+                      ) : (
+                        <span className="text-[9px] font-mono text-white/20">{formatCurrency(player.basePrice)}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Quick Stats */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-ipl-navy border border-ipl-gold/20 rounded-xl p-4 text-center">
+              <div className="text-ipl-gold/40 text-[10px] uppercase font-bold">Sold</div>
+              <div className="text-xl font-black text-white">{players.filter(p => p.status === 'sold').length}</div>
+            </div>
+            <div className="bg-ipl-navy border border-ipl-gold/20 rounded-xl p-4 text-center">
+              <div className="text-ipl-gold/40 text-[10px] uppercase font-bold">Upcoming</div>
+              <div className="text-xl font-black text-white">{players.filter(p => p.status === 'upcoming').length}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default AuctionDashboard;
