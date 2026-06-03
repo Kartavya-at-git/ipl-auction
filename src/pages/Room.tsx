@@ -17,8 +17,10 @@ const Room = () => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = React.useState<'auction' | 'teams' | 'summary'>('auction');
   const [isChatOpen, setIsChatOpen] = React.useState(false);
+  const [hasEnteredAuction, setHasEnteredAuction] = React.useState(false);
   const { user, loading: authLoading } = useAuth();
   const { room, players, activePlayer, teams, participants, recentBids, loading: roomLoading } = useRoom(roomId?.toUpperCase() || '');
+  const [hasEnteredAuction, setHasEnteredAuction] = React.useState(false);
 
   useEffect(() => {
     if (!authLoading && !user) {

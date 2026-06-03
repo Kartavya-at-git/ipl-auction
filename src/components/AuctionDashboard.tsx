@@ -357,8 +357,8 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </button>
                 <button 
                   onClick={handleNextPlayer}
-                  disabled={loading}
-                  className="flex flex-col items-center justify-center gap-1 p-4 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all"
+                  disabled={!!highestBidderTeam || loading}
+                  className="flex flex-col items-center justify-center gap-1 p-4 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all disabled:opacity-20"
                 >
                   <SkipForward size={24} />
                   <span className="text-xs font-black uppercase">Next</span>
