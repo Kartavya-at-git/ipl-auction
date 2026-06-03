@@ -58,16 +58,16 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     } else {
       await handleUnsold();
     }
-
-    // Short delay before moving to next player automatically
-    setTimeout(async () => {
-      await handleNextPlayer();
-    }, 2000);
   };
 
   const handlePlaceBid = async () => {
     if (!userTeam) {
       setError('You must belong to a team to bid');
+      return;
+    }
+
+    if (currentPlayer.highestBidderTeamId === userTeam.id) {
+      setError('You are already the highest bidder');
       return;
     }
 
@@ -188,25 +188,28 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   };
 
   const handleNextPlayer = async () => {
+    // If player is still active and not sold, mark as unsold first
+    if (currentPlayer.status === 'current' && !highestBidderTeam) {
+      await updateDoc(doc(db, 'rooms', room.id, 'players', currentPlayer.id), {
+        status: 'unsold'
+      });
+    }
+
     const isReAuction = room.status === 're-auction-active';
     const availablePlayers = isReAuction 
       ? players.filter(p => p.status === 'unsold' && p.isNominated)
-      : players.filter(p => p.status === 'upcoming' || p.status === 'current');
+      : players.filter(p => (p.status === 'upcoming' || p.status === 'current') && p.id !== currentPlayer.id);
     
-    // Find next player in the current context
-    const currentIndex = availablePlayers.findIndex(p => p.id === currentPlayer.id);
-    const nextPlayer = availablePlayers[currentIndex + 1];
+    const nextPlayer = availablePlayers[0]; // Get the very next one from the filtered upcoming list
 
     if (!nextPlayer) {
       if (room.status === 'active') {
-        // Main auction ended, move to Re-Auction Setup
         await updateDoc(doc(db, 'rooms', room.id), {
           status: 're-auction-setup',
           currentPlayerId: null,
-          timerEndTime: Date.now() + (5 * 60 * 1000) // 5 Minutes
+          timerEndTime: Date.now() + (5 * 60 * 1000)
         });
       } else {
-        // Re-auction ended, complete room
         await updateDoc(doc(db, 'rooms', room.id), {
           status: 'completed',
           currentPlayerId: null
@@ -217,7 +220,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
 
     await updateDoc(doc(db, 'rooms', room.id), {
       currentPlayerId: nextPlayer.id,
-      status: 'active',
+      status: room.status === 're-auction-active' ? 're-auction-active' : 'active',
       timerEndTime: Date.now() + (room.settings.timerDuration * 1000),
       auctionNumber: increment(1)
     });
@@ -267,8 +270,8 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </div>
 
                 {highestBidderTeam && (
-                  <div className="flex items-center gap-3 animate-in fade-in slide-in-from-left-4">
-                    <div className="w-12 h-12 rounded-lg flex items-center justify-center font-bold text-xl text-white shadow-lg" style={{ backgroundColor: highestBidderTeam.color }}>
+                  <div className="flex items-center gap-3 animate-in zoom-in duration-500">
+                    <div className="w-12 h-12 rounded-lg flex items-center justify-center font-bold text-xl text-white shadow-lg animate-bounce" style={{ backgroundColor: highestBidderTeam.color }}>
                       {highestBidderTeam.id}
                     </div>
                     <div>
@@ -308,14 +311,14 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 
                 <button
                   onClick={handlePlaceBid}
-                  disabled={loading || room.status !== 'active' || userTeam?.purseBalance! < nextBidAmount}
+                  disabled={loading || room.status !== 'active' || userTeam?.purseBalance! < nextBidAmount || currentPlayer.highestBidderTeamId === userTeam?.id}
                   className="w-full group relative overflow-hidden bg-ipl-gold disabled:bg-gray-700 h-20 rounded-xl transition-all active:scale-95 shadow-lg"
                 >
                   <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
                   <div className="relative flex flex-col items-center justify-center">
                     <div className="text-ipl-navy font-black text-2xl flex items-center gap-2 uppercase italic">
                       <Gavel size={24} />
-                      BID {formatCurrency(nextBidAmount)}
+                      {currentPlayer.highestBidderTeamId === userTeam?.id ? 'HIGHEST BIDDER' : `BID ${formatCurrency(nextBidAmount)}`}
                     </div>
                     <div className="text-ipl-navy/60 text-[10px] font-bold uppercase tracking-widest">
                       {userTeam?.name} • Balance: {formatCurrency(userTeam?.purseBalance || 0)}
@@ -330,7 +333,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
               <div className="p-6 bg-ipl-navy border-t border-ipl-gold/20 grid grid-cols-2 md:grid-cols-4 gap-4">
                 <button 
                   onClick={handleSold}
-                  disabled={!highestBidderTeam}
+                  disabled={!highestBidderTeam || loading}
                   className="flex flex-col items-center justify-center gap-1 p-4 bg-green-600/10 border border-green-600/30 rounded-xl text-green-500 hover:bg-green-600 hover:text-white transition-all disabled:opacity-20"
                 >
                   <CheckCircle size={24} />
@@ -338,13 +341,15 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </button>
                 <button 
                   onClick={handleUnsold}
-                  className="flex flex-col items-center justify-center gap-1 p-4 bg-red-600/10 border border-red-600/30 rounded-xl text-red-500 hover:bg-red-600 hover:text-white transition-all"
+                  disabled={!!highestBidderTeam || loading}
+                  className="flex flex-col items-center justify-center gap-1 p-4 bg-red-600/10 border border-red-600/30 rounded-xl text-red-500 hover:bg-red-600 hover:text-white transition-all disabled:opacity-20"
                 >
                   <XCircle size={24} />
                   <span className="text-xs font-black uppercase">Unsold</span>
                 </button>
                 <button 
                   onClick={togglePause}
+                  disabled={loading}
                   className="flex flex-col items-center justify-center gap-1 p-4 bg-ipl-gold/10 border border-ipl-gold/30 rounded-xl text-ipl-gold hover:bg-ipl-gold hover:text-ipl-navy transition-all"
                 >
                   {room.status === 'active' ? <Pause size={24} /> : <Play size={24} />}
@@ -352,6 +357,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </button>
                 <button 
                   onClick={handleNextPlayer}
+                  disabled={loading}
                   className="flex flex-col items-center justify-center gap-1 p-4 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all"
                 >
                   <SkipForward size={24} />
