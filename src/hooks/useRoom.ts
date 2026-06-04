@@ -67,6 +67,7 @@ export const useRoom = (roomId: string) => {
           hostId: data.hostId,
           status: data.status,
           currentPlayerId: data.currentPlayerId,
+          currentIndex: data.currentIndex || 0,
           timerEndTime: data.timerEndTime,
           auctionNumber: data.auctionNumber,
           settings: data.settings,

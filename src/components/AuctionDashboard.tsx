@@ -208,22 +208,20 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   };
 
   const handleNextPlayer = async () => {
-    const isReAuction = room.status === 're-auction-active';
-    const availablePlayers = isReAuction 
-      ? players.filter(p => p.status === 'unsold' && p.isNominated)
-      : [...players].filter(p => p.status === 'upcoming' || p.status === 'current')
-        .sort((a, b) => {
-          const setA = a.setNo || 0;
-          const setB = b.setNo || 0;
-          if (setA !== setB) return setA - setB;
-          return a.order - b.order;
-        })
-        .filter(p => p.id !== currentPlayer.id);
-    
-    const nextPlayer = availablePlayers[0];
+    // Single Source of Truth Navigation: Use Index instead of local filter
+    const sortedAllPlayers = [...players].sort((a, b) => {
+      const setA = a.setNo || 0;
+      const setB = b.setNo || 0;
+      if (setA !== setB) return setA - setB;
+      return a.order - b.order;
+    });
+
+    const nextIndex = room.currentIndex + 1;
+    const nextPlayer = sortedAllPlayers[nextIndex];
 
     const updates: any = {};
     
+    // Auto-unsold previous if moving past without bids
     if (currentPlayer.status === 'current' && !highestBidderTeam) {
        updates[`rooms/${room.id}/players/${currentPlayer.id}/status`] = 'unsold';
     }
@@ -241,13 +239,17 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       return;
     }
 
+    const nextEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
+
     updates[`rooms/${room.id}/currentPlayerId`] = nextPlayer.id;
+    updates[`rooms/${room.id}/currentIndex`] = nextIndex;
     updates[`rooms/${room.id}/status`] = room.status === 're-auction-active' ? 're-auction-active' : 'active';
-    updates[`rooms/${room.id}/timerEndTime`] = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
+    updates[`rooms/${room.id}/timerEndTime`] = nextEndTime;
     updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
     
     updates[`rooms/${room.id}/players/${nextPlayer.id}/status`] = 'current';
     updates[`rooms/${room.id}/players/${nextPlayer.id}/currentBid`] = nextPlayer.basePrice;
+    updates[`rooms/${room.id}/players/${nextPlayer.id}/timerEndTime`] = nextEndTime;
 
     await update(ref(db), updates);
   };

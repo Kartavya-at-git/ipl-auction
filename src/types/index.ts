@@ -7,6 +7,7 @@ export interface Room {
   hostId: string;
   status: RoomStatus;
   currentPlayerId: string | null;
+  currentIndex: number;
   timerEndTime: number | null;
   auctionNumber: number;
   settings: {
