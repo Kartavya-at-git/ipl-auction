@@ -211,7 +211,14 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     const isReAuction = room.status === 're-auction-active';
     const availablePlayers = isReAuction 
       ? players.filter(p => p.status === 'unsold' && p.isNominated)
-      : players.filter(p => (p.status === 'upcoming' || p.status === 'current') && p.id !== currentPlayer.id);
+      : [...players].filter(p => p.status === 'upcoming' || p.status === 'current')
+        .sort((a, b) => {
+          const setA = a.setNo || 0;
+          const setB = b.setNo || 0;
+          if (setA !== setB) return setA - setB;
+          return a.order - b.order;
+        })
+        .filter(p => p.id !== currentPlayer.id);
     
     const nextPlayer = availablePlayers[0];
 

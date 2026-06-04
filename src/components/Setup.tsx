@@ -50,6 +50,7 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
           role: row.Role || row.role || '',
           country: row.Country || row.country || '',
           category: row.Category || row.category || 'General',
+          setNo: Number(row['Set No'] || row['Set No.'] || row['Set Number'] || 0),
           status: 'upcoming',
           currentBid: 0,
           highestBidderTeamId: null,
@@ -80,13 +81,23 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
 
     const nextEndTime = Date.now() + (room.settings.timerDuration * 1000);
     
+    // Sort players by Set No then Order
+    const sortedPlayers = [...players].sort((a, b) => {
+      const setA = a.setNo || 0;
+      const setB = b.setNo || 0;
+      if (setA !== setB) return setA - setB;
+      return a.order - b.order;
+    });
+
+    const firstPlayer = sortedPlayers[0];
+
     const updates: any = {};
     updates[`rooms/${room.id}/status`] = 'active';
-    updates[`rooms/${room.id}/currentPlayerId`] = players[0].id;
+    updates[`rooms/${room.id}/currentPlayerId`] = firstPlayer.id;
     updates[`rooms/${room.id}/auctionNumber`] = 1;
-    updates[`rooms/${room.id}/players/${players[0].id}/status`] = 'current';
-    updates[`rooms/${room.id}/players/${players[0].id}/currentBid`] = players[0].basePrice;
-    updates[`rooms/${room.id}/players/${players[0].id}/timerEndTime`] = nextEndTime;
+    updates[`rooms/${room.id}/players/${firstPlayer.id}/status`] = 'current';
+    updates[`rooms/${room.id}/players/${firstPlayer.id}/currentBid`] = firstPlayer.basePrice;
+    updates[`rooms/${room.id}/players/${firstPlayer.id}/timerEndTime`] = nextEndTime;
 
     await update(ref(db), updates);
   };

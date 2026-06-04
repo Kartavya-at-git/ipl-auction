@@ -31,6 +31,8 @@ export interface Player {
   teamId: string | null;
   order: number;
   isNominated?: boolean;
+  setNo?: number;
+  setName?: string;
   timerEndTime?: number | null;
   bidHistory?: {
     amount: number;
