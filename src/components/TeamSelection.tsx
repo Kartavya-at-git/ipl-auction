@@ -63,6 +63,7 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
 
         return currentData;
       });
+      setSelectingId(null);
     } catch (err: any) {
       console.error("Team selection failed:", err);
       setError(err.message || 'Failed to select team. Please try again.');

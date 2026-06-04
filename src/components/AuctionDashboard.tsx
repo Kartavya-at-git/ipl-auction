@@ -387,14 +387,14 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 
                 <button
                   onClick={handlePlaceBid}
-                  disabled={loading || room.status !== 'active' || userTeam?.purseBalance! < nextBidAmount || currentPlayer.highestBidderTeamId === userTeam?.id}
+                  disabled={loading || room.status !== 'active' || timeLeft === 0 || userTeam?.purseBalance! < nextBidAmount || currentPlayer.highestBidderTeamId === userTeam?.id}
                   className="w-full group relative overflow-hidden bg-ipl-gold disabled:bg-gray-700 h-20 rounded-xl transition-all active:scale-95 shadow-lg"
                 >
                   <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
                   <div className="relative flex flex-col items-center justify-center">
                     <div className="text-ipl-navy font-black text-2xl flex items-center gap-2 uppercase italic">
                       <Gavel size={24} />
-                      {currentPlayer.highestBidderTeamId === userTeam?.id ? 'HIGHEST BIDDER' : `BID ${formatCurrency(nextBidAmount)}`}
+                      {timeLeft === 0 ? 'TIME EXPIRED' : (currentPlayer.highestBidderTeamId === userTeam?.id ? 'HIGHEST BIDDER' : `BID ${formatCurrency(nextBidAmount)}`)}
                     </div>
                     <div className="text-ipl-navy/60 text-[10px] font-bold uppercase tracking-widest">
                       {userTeam?.name} • Balance: {formatCurrency(userTeam?.purseBalance || 0)}

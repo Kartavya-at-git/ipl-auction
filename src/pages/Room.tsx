@@ -17,7 +17,9 @@ const Room = () => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = React.useState<'auction' | 'teams' | 'summary'>('auction');
   const [isChatOpen, setIsChatOpen] = React.useState(false);
-  const [hasEnteredAuction, setHasEnteredAuction] = React.useState(false);
+  const [hasEnteredAuction, setHasEnteredAuction] = React.useState(() => {
+    return localStorage.getItem(`hasEntered_${roomId?.toUpperCase()}`) === 'true';
+  });
   const { user, loading: authLoading } = useAuth();
   const { room, players, activePlayer, teams, participants, recentBids, serverTimeOffset, loading: roomLoading } = useRoom(roomId?.toUpperCase() || '');
   
@@ -139,7 +141,10 @@ const Room = () => {
             teams={teams} 
             participants={participants} 
             currentUserUid={user?.uid || ''} 
-            onEnterAuction={() => setHasEnteredAuction(true)} 
+            onEnterAuction={() => {
+              localStorage.setItem(`hasEntered_${roomId?.toUpperCase()}`, 'true');
+              setHasEnteredAuction(true);
+            }} 
           />
         </main>
       </div>
