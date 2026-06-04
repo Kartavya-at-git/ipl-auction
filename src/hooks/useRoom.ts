@@ -70,6 +70,7 @@ export const useRoom = (roomId: string) => {
           currentIndex: data.currentIndex || 0,
           timerEndTime: data.timerEndTime,
           auctionNumber: data.auctionNumber,
+          isReAuctionPhase: data.isReAuctionPhase || false,
           settings: data.settings,
           createdAt: data.createdAt
         } as Room);

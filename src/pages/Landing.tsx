@@ -53,8 +53,8 @@ const Landing = () => {
         timerEndTime: null,
         auctionNumber: 0,
         settings: {
-          initialPurse: 1000000000, // 100 Cr default
-          timerDuration: 15,
+          initialPurse: 120000000, // 120 Cr default
+          timerDuration: 30, // 30 seconds default
           availableTeams: ['MI', 'CSK', 'RCB', 'KKR', 'SRH', 'GT', 'LSG', 'RR', 'DC', 'PBKS']
         },
         createdAt: serverTimestamp(),

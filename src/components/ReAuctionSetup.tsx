@@ -15,7 +15,7 @@ interface ReAuctionSetupProps {
 
 const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuctionSetupProps) => {
   const [timeLeft, setTimeLeft] = useState(0);
-  const unsoldPlayers = players.filter(p => p.status === 'unsold');
+  const unsoldPlayers = players.filter(p => p.status === 'unsold' || p.status === 'nominated');
   const userTeam = teams.find(t => t.ownerUid === currentUserUid);
 
   useEffect(() => {
@@ -38,14 +38,13 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
     if (!userTeam) return;
 
     const currentlyNominatedByMe = !!(player.nominatedBy && player.nominatedBy[userTeam.id]);
+    const otherNominators = Object.keys(player.nominatedBy || {}).filter(id => id !== userTeam.id);
+    const willHaveNominators = !currentlyNominatedByMe || otherNominators.length > 0;
     
     const updates: any = {};
     updates[`rooms/${room.id}/players/${player.id}/nominatedBy/${userTeam.id}`] = currentlyNominatedByMe ? null : true;
-    
-    // A player is nominated if at least one team (other than the one un-nominating) still has them
-    const otherNominators = Object.keys(player.nominatedBy || {}).filter(id => id !== userTeam.id);
-    const willBeNominated = !currentlyNominatedByMe || otherNominators.length > 0;
-    updates[`rooms/${room.id}/players/${player.id}/isNominated`] = willBeNominated;
+    updates[`rooms/${room.id}/players/${player.id}/isNominated`] = willHaveNominators;
+    updates[`rooms/${room.id}/players/${player.id}/status`] = willHaveNominators ? 'nominated' : 'unsold';
 
     await update(ref(db), updates);
   };
@@ -61,16 +60,18 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
   };
 
   const handleStartReAuction = async () => {
-    const nominatedPlayers = players.filter(p => p.status === 'unsold' && p.isNominated);
+    const nominatedPlayers = players.filter(p => p.status === 'nominated');
     if (nominatedPlayers.length === 0) return;
 
     const updates: any = {};
     updates[`rooms/${room.id}/status`] = 're-auction-active';
+    updates[`rooms/${room.id}/isReAuctionPhase`] = true;
     updates[`rooms/${room.id}/currentPlayerId`] = nominatedPlayers[0].id;
     updates[`rooms/${room.id}/timerEndTime`] = Date.now() + (room.settings.timerDuration * 1000);
     updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
     updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/status`] = 'current';
     updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/currentBid`] = nominatedPlayers[0].basePrice;
+    updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/highestBidderTeamId`] = null;
 
     await update(ref(db), updates);
   };
@@ -100,11 +101,11 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mt-6">
             <button
               onClick={handleStartReAuction}
-              disabled={players.filter(p => p.status === 'unsold' && p.isNominated).length === 0}
+              disabled={players.filter(p => p.status === 'nominated').length === 0}
               className="flex items-center justify-center gap-2 px-8 py-3 bg-ipl-gold text-ipl-navy font-black rounded-lg hover:bg-ipl-gold/90 transition-all disabled:opacity-30 disabled:grayscale"
             >
               <Play size={20} fill="currentColor" />
-              START RE-AUCTION ({players.filter(p => p.status === 'unsold' && p.isNominated).length})
+              START RE-AUCTION ({players.filter(p => p.status === 'nominated').length})
             </button>
             
             <button

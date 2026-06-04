@@ -1,5 +1,5 @@
 export type RoomStatus = 'waiting' | 'setup' | 'active' | 'paused' | 're-auction-setup' | 're-auction-active' | 'completed';
-export type PlayerStatus = 'upcoming' | 'current' | 'sold' | 'unsold';
+export type PlayerStatus = 'upcoming' | 'current' | 'sold' | 'unsold' | 'nominated';
 export type UserRole = 'host' | 'participant';
 
 export interface Room {
@@ -10,6 +10,7 @@ export interface Room {
   currentIndex: number;
   timerEndTime: number | null;
   auctionNumber: number;
+  isReAuctionPhase?: boolean;
   settings: {
     initialPurse: number;
     timerDuration: number;
@@ -33,6 +34,7 @@ export interface Player {
   order: number;
   isNominated?: boolean;
   nominatedBy?: Record<string, boolean>;
+  passes?: Record<string, boolean>;
   setNo?: number;
   setName?: string;
   timerEndTime?: number | null;

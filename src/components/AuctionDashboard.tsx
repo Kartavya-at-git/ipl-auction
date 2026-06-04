@@ -65,19 +65,14 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   }, [room.status, room.timerEndTime, serverTimeOffset]);
 
   const handleTimerEnd = async () => {
-    // Both Host and Participants can attempt to execute the timer end to ensure it fires.
-    // The RTDB transaction will ensure it only actually updates once.
     try {
-      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+      const result = await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
         if (!currentData || !currentData.players || !currentData.players[currentPlayer.id]) return currentData;
         
         const player = currentData.players[currentPlayer.id];
-        
-        // Anti-glitch: Ensure it's still current
-        if (player.status !== 'current') return currentData; // Already processed
+        if (player.status !== 'current') return currentData;
 
         if (player.highestBidderTeamId) {
-          // Sold Logic
           player.status = 'sold';
           player.soldPrice = player.currentBid;
           player.teamId = player.highestBidderTeamId;
@@ -87,7 +82,6 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
             currentData.teams[player.highestBidderTeamId].playerCount += 1;
           }
         } else {
-          // Unsold Logic
           player.status = 'unsold';
         }
         
@@ -98,8 +92,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
         return currentData;
       });
 
-      // Auto-advance after delay (handled by host)
-      if (isHost) {
+      if (isHost && result.committed) {
         setTimeout(async () => {
           await handleNextPlayer();
         }, 2000);
@@ -108,6 +101,38 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       console.error("Timer End Transaction failed", err);
     }
   };
+
+  // Dynamic Observer: Host automatically advances after Sold/Unsold
+  useEffect(() => {
+    if (!isHost || (currentPlayer.status !== 'sold' && currentPlayer.status !== 'unsold')) return;
+
+    const timeout = setTimeout(async () => {
+      // Re-verify status hasn't changed (e.g. by Reset) before advancing
+      if (currentPlayer.status === 'sold' || currentPlayer.status === 'unsold') {
+        await handleNextPlayer();
+      }
+    }, 2000);
+
+    return () => clearTimeout(timeout);
+  }, [currentPlayer.status, currentPlayer.id, isHost]);
+
+  // Cinematic Sound Effects
+  useEffect(() => {
+    if (currentPlayer.status === 'sold') {
+      const audio = new Audio('/Gavel-sound-effect.mp3');
+      audio.volume = 0.6;
+      
+      // Delay sound to match hammer impact (approx 400ms into the animation)
+      const soundTimeout = setTimeout(() => {
+        audio.play().catch(e => console.warn("Sound play blocked by browser:", e));
+      }, 400);
+
+      return () => {
+        clearTimeout(soundTimeout);
+        audio.pause();
+      };
+    }
+  }, [currentPlayer.status, currentPlayer.id]);
 
   const handlePlaceBid = async () => {
     if (!userTeam) {
@@ -167,11 +192,12 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
         if (team.purseBalance < currentNextBid) return;
         if (team.playerCount >= 25) return;
 
-        // 3. Timer Extension (+10 seconds from now)
-        const newTimer = serverTime + 10000;
+        // 3. Timer Extension (+30 seconds from now)
+        const newTimer = serverTime + 30000;
 
         player.currentBid = currentNextBid;
         player.highestBidderTeamId = userTeam.id;
+        player.passes = null; // IMPORTANT: Clear all passes when a new bid arrives
         
         currentData.timerEndTime = newTimer;
         player.timerEndTime = newTimer;
@@ -194,6 +220,60 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     }
   };
 
+  const handlePassPlayer = async () => {
+    if (!userTeam || loading || room.status !== 'active' || timeLeft === 0) return;
+
+    setLoading(true);
+    try {
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData || !currentData.players || !currentData.players[currentPlayer.id]) return currentData;
+        
+        const player = currentData.players[currentPlayer.id];
+        if (player.status !== 'current') return currentData;
+
+        if (!player.passes) player.passes = {};
+        player.passes[userTeam.id] = true;
+
+        const activeTeams = Object.values(currentData.teams || {}).filter((t: any) => !!t.ownerUid).length;
+        const passCount = Object.keys(player.passes).length;
+
+        // Consensus logic
+        if (!player.highestBidderTeamId) {
+          // All active teams passed -> Unsold
+          if (passCount >= activeTeams) {
+            player.status = 'unsold';
+            currentData.status = 'paused';
+            currentData.timerEndTime = null;
+          }
+        } else {
+          // Everyone except the highest bidder passed -> Sold
+          const isLeaderPassing = !!player.passes[player.highestBidderTeamId];
+          const neededPasses = isLeaderPassing ? activeTeams : activeTeams - 1;
+          
+          if (passCount >= neededPasses) {
+            player.status = 'sold';
+            player.soldPrice = player.currentBid;
+            player.teamId = player.highestBidderTeamId;
+            
+            if (currentData.teams && currentData.teams[player.highestBidderTeamId]) {
+              currentData.teams[player.highestBidderTeamId].purseBalance -= player.currentBid;
+              currentData.teams[player.highestBidderTeamId].playerCount += 1;
+            }
+            
+            currentData.status = 'paused';
+            currentData.timerEndTime = null;
+          }
+        }
+
+        return currentData;
+      });
+    } catch (err) {
+      console.error("Pass failed", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSold = async () => {
     // No longer needed as manual button, handled by handleTimerEnd automation,
     // but kept as a force-trigger for the host
@@ -208,11 +288,11 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   };
 
   const handleNextPlayer = async () => {
-    const isReAuction = room.status === 're-auction-active';
+    const isReAuction = room.isReAuctionPhase;
     
-    // Define the pool based on auction phase
+    // Define the pool based on auction phase (Stable across pauses)
     const playerPool = isReAuction 
-      ? [...players].filter(p => p.status === 'unsold' && p.isNominated)
+      ? [...players].filter(p => p.isNominated)
         .sort((a, b) => {
           const setA = a.setNo || 0;
           const setB = b.setNo || 0;
@@ -238,7 +318,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     }
 
     if (!nextPlayer) {
-      if (room.status === 'active') {
+      if (!isReAuction) {
         updates[`rooms/${room.id}/status`] = 're-auction-setup';
         updates[`rooms/${room.id}/currentPlayerId`] = null;
         updates[`rooms/${room.id}/timerEndTime`] = Date.now() + serverTimeOffset + (5 * 60 * 1000);
@@ -250,10 +330,10 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       return;
     }
 
+
     const nextEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
 
     updates[`rooms/${room.id}/currentPlayerId`] = nextPlayer.id;
-    // We update currentIndex for main auction tracking, or just rely on IDs for re-auction
     if (!isReAuction) updates[`rooms/${room.id}/currentIndex`] = currentPoolIndex + 1;
     
     updates[`rooms/${room.id}/status`] = isReAuction ? 're-auction-active' : 'active';
@@ -369,38 +449,141 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
               </div>
             </div>
 
-            {/* Status Overlay (Sold/Unsold) */}
+            {/* Status Overlay (Sold/Unsold) - Extreme Cinematic Mode */}
             {(currentPlayer.status === 'sold' || currentPlayer.status === 'unsold') && (
-              <div className="absolute inset-0 z-50 flex items-center justify-center bg-ipl-navy/60 backdrop-blur-sm animate-in fade-in zoom-in duration-300">
-                <div className={`text-8xl font-black italic uppercase tracking-tighter transform -rotate-12 border-8 px-8 py-2 rounded-xl shadow-2xl animate-bounce ${
-                  currentPlayer.status === 'sold' ? 'text-green-500 border-green-500' : 'text-red-500 border-red-500'
-                }`}>
-                  {currentPlayer.status}
+              <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-ipl-navy/90 backdrop-blur-3xl animate-in fade-in duration-700 overflow-hidden rounded-2xl">
+                
+                {/* Cinematic Watermark (Always in background) */}
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 -z-10 select-none pointer-events-none opacity-20 animate-in zoom-in duration-1000">
+                   <div className={`text-[12rem] md:text-[28rem] font-black italic tracking-tighter leading-none ${
+                     currentPlayer.status === 'sold' ? 'text-green-500/30' : 'text-red-500/30'
+                   }`}>
+                     {currentPlayer.status}
+                   </div>
                 </div>
+
+                <div className="relative w-full h-full flex items-center justify-center">
+                  {currentPlayer.status === 'sold' ? (
+                    <div className="relative">
+                      {/* Impact FX */}
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 border-4 border-ipl-gold/40 rounded-full animate-impact" />
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-ipl-gold/10 rounded-full blur-[120px] animate-spotlight" />
+                      
+                      {/* Smoke FX */}
+                      {[...Array(8)].map((_, i) => (
+                        <div 
+                          key={`smoke-${i}`}
+                          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 bg-white/10 rounded-full blur-3xl animate-smoke"
+                          style={{ animationDelay: `${0.4 + i * 0.1}s`, transform: `translate(${(i-3.5)*40}px, -20px)` }}
+                        />
+                      ))}
+
+                      {/* Large Cinematic Gavel - Accurate Center Strike */}
+                      <div className="animate-gavel-pro z-40 relative pointer-events-none">
+                        <div className="relative flex flex-col items-center -rotate-[45deg] translate-y-[-40px] translate-x-[100px] md:translate-x-[140px]">
+                          {/* 3D Metallic Head */}
+                          <div className="w-40 h-20 md:w-56 md:h-28 bg-gradient-to-br from-[#a67c37] via-[#4a2e19] to-[#2a1a0d] rounded-xl border-4 border-ipl-gold shadow-[0_40px_100px_rgba(0,0,0,0.8)] relative overflow-hidden">
+                             <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/30 to-transparent translate-x-[-100%] animate-[shimmer_2s_infinite]" />
+                             <div className="absolute inset-y-0 left-0 w-3 bg-black/40" />
+                             <div className="absolute inset-y-0 right-0 w-3 bg-black/40" />
+                             <div className="absolute inset-y-0 left-1/2 w-8 bg-ipl-gold/20 -translate-x-1/2" />
+                          </div>
+                          {/* Elegant Solid Handle */}
+                          <div className="w-5 h-72 md:w-8 md:h-[400px] bg-gradient-to-b from-[#4a2e19] to-black rounded-b-full shadow-2xl border-x border-white/5" />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="relative flex flex-col items-center animate-in zoom-in duration-500 scale-125 md:scale-150">
+                       <XCircle size={240} className="text-red-500/20 animate-pulse" />
+                       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full bg-red-500/10 blur-3xl rounded-full" />
+                    </div>
+                  )}
+                </div>
+
+                {/* News Ticker Strip - Single Slim Horizontal Line */}
+                {currentPlayer.status === 'sold' && highestBidderTeam && (
+                  <div className="absolute bottom-0 left-0 w-full bg-ipl-gold border-t border-white/20 z-50 h-7 md:h-10 overflow-hidden flex items-center">
+                    <div className="animate-ticker flex flex-row items-center whitespace-nowrap">
+                      {[...Array(12)].map((_, i) => (
+                        <div key={i} className="flex items-center text-ipl-navy font-black text-[10px] md:text-sm uppercase italic tracking-widest px-4 shrink-0">
+                          <span>{currentPlayer.name}</span>
+                          <span className="mx-3 text-white/50 text-[6px]">●</span>
+                          <span className="font-mono">{formatCurrency(currentPlayer.soldPrice || 0)}</span>
+                          <span className="mx-3 text-white/50 text-[6px]">●</span>
+                          <span>{highestBidderTeam.name}</span>
+                          <span className="mx-6 text-white/30 font-light">|</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
             {/* Bidding Controls */}
             {!isHost && (
-              <div className="p-6 bg-ipl-navy border-t border-ipl-gold/20">
-                {error && <div className="mb-4 text-center text-red-400 text-sm font-bold bg-red-400/10 p-2 rounded border border-red-400/20">{error}</div>}
+              <div className="p-6 bg-ipl-navy border-t border-ipl-gold/20 space-y-4">
+                {error && <div className="text-center text-red-400 text-sm font-bold bg-red-400/10 p-2 rounded border border-red-400/20">{error}</div>}
                 
-                <button
-                  onClick={handlePlaceBid}
-                  disabled={loading || room.status !== 'active' || timeLeft === 0 || userTeam?.purseBalance! < nextBidAmount || currentPlayer.highestBidderTeamId === userTeam?.id}
-                  className="w-full group relative overflow-hidden bg-ipl-gold disabled:bg-gray-700 h-20 rounded-xl transition-all active:scale-95 shadow-lg"
-                >
-                  <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
-                  <div className="relative flex flex-col items-center justify-center">
-                    <div className="text-ipl-navy font-black text-2xl flex items-center gap-2 uppercase italic">
-                      <Gavel size={24} />
-                      {timeLeft === 0 ? 'TIME EXPIRED' : (currentPlayer.highestBidderTeamId === userTeam?.id ? 'HIGHEST BIDDER' : `BID ${formatCurrency(nextBidAmount)}`)}
+                <div className="flex gap-4">
+                  <button
+                    onClick={handlePlaceBid}
+                    disabled={loading || room.status !== 'active' || timeLeft === 0 || userTeam?.purseBalance! < nextBidAmount || currentPlayer.highestBidderTeamId === userTeam?.id || !!(currentPlayer.passes?.[userTeam?.id || ''])}
+                    className="flex-[2] group relative overflow-hidden bg-ipl-gold disabled:bg-gray-700 h-20 rounded-xl transition-all active:scale-95 shadow-lg"
+                  >
+                    <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
+                    <div className="relative flex flex-col items-center justify-center">
+                      <div className="text-ipl-navy font-black text-2xl flex items-center gap-2 uppercase italic">
+                        <Gavel size={24} />
+                        {timeLeft === 0 ? 'TIME EXPIRED' : 
+                         currentPlayer.passes?.[userTeam?.id || ''] ? 'WAITING FOR RIVAL...' :
+                         currentPlayer.highestBidderTeamId === userTeam?.id ? 'HIGHEST BIDDER' : `BID ${formatCurrency(nextBidAmount)}`}
+                      </div>
+                      <div className="text-ipl-navy/60 text-[10px] font-bold uppercase tracking-widest">
+                        {userTeam?.name} • Balance: {formatCurrency(userTeam?.purseBalance || 0)}
+                      </div>
                     </div>
-                    <div className="text-ipl-navy/60 text-[10px] font-bold uppercase tracking-widest">
-                      {userTeam?.name} • Balance: {formatCurrency(userTeam?.purseBalance || 0)}
+                  </button>
+
+                  <button
+                    onClick={handlePassPlayer}
+                    disabled={loading || room.status !== 'active' || timeLeft === 0 || currentPlayer.highestBidderTeamId === userTeam?.id || !!(currentPlayer.passes?.[userTeam?.id || ''])}
+                    className="flex-1 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white/10 transition-all disabled:opacity-20 flex flex-col items-center justify-center gap-1"
+                  >
+                    <XCircle size={24} className={currentPlayer.passes?.[userTeam?.id || ''] ? 'text-green-500' : 'text-red-500'} />
+                    <span className="text-[10px] font-black uppercase">{currentPlayer.passes?.[userTeam?.id || ''] ? 'PASSED' : 'No Bid'}</span>
+                  </button>
+                </div>
+
+                {/* Consensus Progress */}
+                {room.status === 'active' && (
+                  <div className="flex items-center justify-between px-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[8px] font-black text-white/20 uppercase">Interest Map:</span>
+                      <div className="flex -space-x-1.5">
+                        {teams.filter(t => !!t.ownerUid).map(t => {
+                          const hasPassed = !!(currentPlayer.passes?.[t.id]);
+                          const isLeading = currentPlayer.highestBidderTeamId === t.id;
+                          return (
+                            <div 
+                              key={t.id}
+                              className={`w-6 h-6 rounded-full border-2 flex items-center justify-center text-[8px] font-black text-white shadow-sm transition-all duration-500 ${
+                                hasPassed ? 'opacity-30 border-red-500 grayscale' : isLeading ? 'border-green-500 scale-110 z-10' : 'border-ipl-gold'
+                              }`}
+                              style={{ backgroundColor: t.color }}
+                            >
+                              {t.id}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="text-[9px] font-black text-ipl-gold/40 uppercase tracking-tighter italic animate-pulse">
+                      {currentPlayer.highestBidderTeamId ? 'Waiting for Rivals to Pass...' : 'Waiting for Consensus...'}
                     </div>
                   </div>
-                </button>
+                )}
               </div>
             )}
 
