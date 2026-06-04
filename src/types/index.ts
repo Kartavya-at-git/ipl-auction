@@ -32,6 +32,7 @@ export interface Player {
   teamId: string | null;
   order: number;
   isNominated?: boolean;
+  nominatedBy?: Record<string, boolean>;
   setNo?: number;
   setName?: string;
   timerEndTime?: number | null;

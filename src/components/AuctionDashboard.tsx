@@ -30,7 +30,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     ? getNextBid(currentPlayer.currentBid) 
     : currentPlayer.basePrice;
   const highestBidderTeam = teams.find(t => t.id === currentPlayer.highestBidderTeamId);
-  const currentSetPlayers = players.filter(p => p.category === currentPlayer.category);
+  const currentSetPlayers = players.filter(p => p.setNo === currentPlayer.setNo);
 
   // Squad Limits
   const userTeamPlayers = userTeam ? players.filter(p => p.teamId === userTeam.id) : [];
@@ -208,21 +208,32 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   };
 
   const handleNextPlayer = async () => {
-    // Single Source of Truth Navigation: Use Index instead of local filter
-    const sortedAllPlayers = [...players].sort((a, b) => {
-      const setA = a.setNo || 0;
-      const setB = b.setNo || 0;
-      if (setA !== setB) return setA - setB;
-      return a.order - b.order;
-    });
+    const isReAuction = room.status === 're-auction-active';
+    
+    // Define the pool based on auction phase
+    const playerPool = isReAuction 
+      ? [...players].filter(p => p.status === 'unsold' && p.isNominated)
+        .sort((a, b) => {
+          const setA = a.setNo || 0;
+          const setB = b.setNo || 0;
+          if (setA !== setB) return setA - setB;
+          return a.order - b.order;
+        })
+      : [...players].sort((a, b) => {
+          const setA = a.setNo || 0;
+          const setB = b.setNo || 0;
+          if (setA !== setB) return setA - setB;
+          return a.order - b.order;
+        });
 
-    const nextIndex = room.currentIndex + 1;
-    const nextPlayer = sortedAllPlayers[nextIndex];
+    // Find the current player's index in the active pool
+    const currentPoolIndex = playerPool.findIndex(p => p.id === currentPlayer.id);
+    const nextPlayer = playerPool[currentPoolIndex + 1];
 
     const updates: any = {};
     
-    // Auto-unsold previous if moving past without bids
-    if (currentPlayer.status === 'current' && !highestBidderTeam) {
+    // Auto-unsold previous if moving past without bids in main auction
+    if (!isReAuction && currentPlayer.status === 'current' && !highestBidderTeam) {
        updates[`rooms/${room.id}/players/${currentPlayer.id}/status`] = 'unsold';
     }
 
@@ -242,8 +253,10 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     const nextEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
 
     updates[`rooms/${room.id}/currentPlayerId`] = nextPlayer.id;
-    updates[`rooms/${room.id}/currentIndex`] = nextIndex;
-    updates[`rooms/${room.id}/status`] = room.status === 're-auction-active' ? 're-auction-active' : 'active';
+    // We update currentIndex for main auction tracking, or just rely on IDs for re-auction
+    if (!isReAuction) updates[`rooms/${room.id}/currentIndex`] = currentPoolIndex + 1;
+    
+    updates[`rooms/${room.id}/status`] = isReAuction ? 're-auction-active' : 'active';
     updates[`rooms/${room.id}/timerEndTime`] = nextEndTime;
     updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
     
@@ -530,7 +543,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-black text-ipl-gold/60 uppercase tracking-widest flex items-center gap-2">
                   <ListFilter size={16} />
-                  Set: {currentPlayer.category || 'General'}
+                  SET {currentPlayer.setNo}: {currentPlayer.category || 'General'}
                 </h3>
                 <span className="text-[10px] font-bold text-white/20 uppercase bg-white/5 px-2 py-0.5 rounded">
                   {currentSetPlayers.filter(p => p.status === 'sold').length} / {currentSetPlayers.length} Sold

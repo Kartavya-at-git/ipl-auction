@@ -35,13 +35,18 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
   }, [room.timerEndTime, isHost]);
 
   const toggleNomination = async (player: Player) => {
-    if (!userTeam && !isHost) return;
+    if (!userTeam) return;
 
-    // The user said: "for 2nd a both team can choose same player in reauction nomination, every team can select the number of player they want and can be same no problem no unselect."
-    // So we just allow anyone to nominate, and we don't care about un-nominating, or we let anyone toggle it if they want. Let's just do a simple toggle.
+    const currentlyNominatedByMe = !!(player.nominatedBy && player.nominatedBy[userTeam.id]);
     
     const updates: any = {};
-    updates[`rooms/${room.id}/players/${player.id}/isNominated`] = !player.isNominated;
+    updates[`rooms/${room.id}/players/${player.id}/nominatedBy/${userTeam.id}`] = currentlyNominatedByMe ? null : true;
+    
+    // A player is nominated if at least one team (other than the one un-nominating) still has them
+    const otherNominators = Object.keys(player.nominatedBy || {}).filter(id => id !== userTeam.id);
+    const willBeNominated = !currentlyNominatedByMe || otherNominators.length > 0;
+    updates[`rooms/${room.id}/players/${player.id}/isNominated`] = willBeNominated;
+
     await update(ref(db), updates);
   };
 
@@ -113,34 +118,61 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
       </div>
 
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {unsoldPlayers.map((player) => (
-          <button
-            key={player.id}
-            onClick={() => toggleNomination(player)}
-            disabled={!userTeam}
-            className={`p-4 rounded-xl border transition-all text-left group relative ${
-              player.isNominated 
-                ? 'bg-ipl-gold/10 border-ipl-gold shadow-lg' 
-                : 'bg-ipl-navy border-ipl-gold/10 hover:border-ipl-gold/40'
-            }`}
-          >
-            <div className="flex justify-between items-start mb-2">
-              <div className="text-[10px] font-bold text-ipl-gold/40 uppercase tracking-wider">{player.role}</div>
-              {player.isNominated && <CheckCircle2 size={16} className="text-ipl-gold" />}
-            </div>
-            <div className="text-lg font-black text-white uppercase italic truncate">{player.name}</div>
-            <div className="text-sm font-mono text-ipl-gold mt-1">{formatCurrency(player.basePrice)}</div>
-            
-            {!player.isNominated && userTeam && (
-              <div className="absolute inset-0 flex items-center justify-center bg-ipl-navy/80 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl">
-                <div className="flex items-center gap-2 text-ipl-gold font-bold text-sm">
-                  <UserPlus size={18} />
-                  NOMINATE
-                </div>
+        {unsoldPlayers.map((player) => {
+          const isNominatedByMe = !!(userTeam && player.nominatedBy?.[userTeam.id]);
+          const nominators = Object.keys(player.nominatedBy || {});
+
+          return (
+            <button
+              key={player.id}
+              onClick={() => toggleNomination(player)}
+              disabled={!userTeam}
+              className={`p-4 rounded-xl border transition-all text-left group relative ${
+                isNominatedByMe 
+                  ? 'bg-ipl-gold/10 border-ipl-gold shadow-lg' 
+                  : 'bg-ipl-navy border-ipl-gold/10 hover:border-ipl-gold/40'
+              }`}
+            >
+              <div className="flex justify-between items-start mb-2">
+                <div className="text-[10px] font-bold text-ipl-gold/40 uppercase tracking-wider">{player.role}</div>
+                {isNominatedByMe && <CheckCircle2 size={16} className="text-ipl-gold" />}
               </div>
-            )}
-          </button>
-        ))}
+              <div className="text-lg font-black text-white uppercase italic truncate">{player.name}</div>
+              <div className="text-sm font-mono text-ipl-gold mt-1">{formatCurrency(player.basePrice)}</div>
+              
+              {/* Nominating Teams Logos */}
+              {nominators.length > 0 && (
+                <div className="mt-4 flex items-center gap-1 border-t border-white/5 pt-3">
+                  <div className="text-[8px] font-black text-white/20 uppercase mr-1">Interested:</div>
+                  <div className="flex -space-x-1.5">
+                    {nominators.map(teamId => {
+                      const teamInfo = teams.find(t => t.id === teamId);
+                      return (
+                        <div 
+                          key={teamId} 
+                          title={teamInfo?.name}
+                          className="w-5 h-5 rounded-full border border-ipl-bg flex items-center justify-center text-[7px] font-black text-white shadow-sm shrink-0" 
+                          style={{ backgroundColor: teamInfo?.color || '#333' }}
+                        >
+                          {teamId}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {!isNominatedByMe && userTeam && (
+                <div className="absolute inset-0 flex items-center justify-center bg-ipl-navy/80 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl">
+                  <div className="flex items-center gap-2 text-ipl-gold font-bold text-sm">
+                    <UserPlus size={18} />
+                    NOMINATE
+                  </div>
+                </div>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {unsoldPlayers.length === 0 && (

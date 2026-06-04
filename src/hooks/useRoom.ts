@@ -99,10 +99,26 @@ export const useRoom = (roomId: string) => {
       }
     });
 
+    // Players listener (Global Source of Truth)
+    const playersRef = ref(db, `rooms/${roomId}/players`);
+    const playersUnsubscribe = onValue(playersRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        const playersArray = Object.keys(data).map(key => ({
+          id: key,
+          ...data[key]
+        })).sort((a, b) => a.order - b.order) as Player[];
+        setPlayers(playersArray);
+      } else {
+        setPlayers([]);
+      }
+    });
+
     return () => {
       roomUnsubscribe();
       participantsUnsubscribe();
       teamsUnsubscribe();
+      playersUnsubscribe();
     };
   }, [roomId]);
 
@@ -134,8 +150,6 @@ export const useRoom = (roomId: string) => {
         } else {
           setRecentBids([]);
         }
-
-        setPlayers(prev => prev.map(p => p.id === pData.id ? pData : p));
       }
     });
 
@@ -143,25 +157,6 @@ export const useRoom = (roomId: string) => {
       playerUnsubscribe();
     };
   }, [roomId, room?.currentPlayerId]);
-
-  // 4. Setup Phase Player Listener
-  useEffect(() => {
-    if (!roomId || !room || (room.status !== 'waiting' && room.status !== 'setup')) return;
-
-    const playersRef = ref(db, `rooms/${roomId}/players`);
-    const playersUnsubscribe = onValue(playersRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const playersArray = Object.keys(data).map(key => ({
-          id: key,
-          ...data[key]
-        })).sort((a, b) => a.order - b.order) as Player[];
-        setPlayers(playersArray);
-      }
-    });
-
-    return () => playersUnsubscribe();
-  }, [roomId, room?.status]);
 
   return { room, players, activePlayer, teams, participants, recentBids, loading, serverTimeOffset };
 };
