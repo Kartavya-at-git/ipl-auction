@@ -19,7 +19,7 @@ const Room = () => {
   const [isChatOpen, setIsChatOpen] = React.useState(false);
   const [hasEnteredAuction, setHasEnteredAuction] = React.useState(false);
   const { user, loading: authLoading } = useAuth();
-  const { room, players, activePlayer, teams, participants, recentBids, loading: roomLoading } = useRoom(roomId?.toUpperCase() || '');
+  const { room, players, activePlayer, teams, participants, recentBids, serverTimeOffset, loading: roomLoading } = useRoom(roomId?.toUpperCase() || '');
   
 
   useEffect(() => {
@@ -200,6 +200,7 @@ const Room = () => {
                   recentBids={recentBids}
                   isHost={isHost}
                   currentUserUid={user?.uid || ''}
+                  serverTimeOffset={serverTimeOffset}
                 />
               ) : (
                 <div className="text-center py-20 flex flex-col items-center gap-4">

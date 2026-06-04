@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { Room, Player, Team } from '../types';
-import { doc, updateDoc, increment } from 'firebase/firestore';
+import { ref, update } from 'firebase/database';
 import { db } from '../lib/firebase';
 import { formatCurrency } from '../utils/helpers';
 import { Timer, UserPlus, Play, CheckCircle2 } from 'lucide-react';
@@ -28,7 +28,6 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
 
       if (diff === 0 && isHost) {
         clearInterval(interval);
-        // handleStartReAuction(); // Can auto-start if needed
       }
     }, 1000);
 
@@ -38,40 +37,37 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
   const toggleNomination = async (player: Player) => {
     if (!userTeam && !isHost) return;
 
-    // Prevent non-hosts from un-nominating players
-    if (!isHost && player.isNominated) return;
-
-    const playerRef = doc(db, 'rooms', room.id, 'players', player.id);
-    await updateDoc(playerRef, {
-      isNominated: !player.isNominated
-    });
+    // The user said: "for 2nd a both team can choose same player in reauction nomination, every team can select the number of player they want and can be same no problem no unselect."
+    // So we just allow anyone to nominate, and we don't care about un-nominating, or we let anyone toggle it if they want. Let's just do a simple toggle.
+    
+    const updates: any = {};
+    updates[`rooms/${room.id}/players/${player.id}/isNominated`] = !player.isNominated;
+    await update(ref(db), updates);
   };
 
   const handleEndAuction = async () => {
     if (!confirm('Are you sure you want to end the auction permanently?')) return;
     
-    await updateDoc(doc(db, 'rooms', room.id), {
-      status: 'completed',
-      currentPlayerId: null,
-      timerEndTime: null
-    });
+    const updates: any = {};
+    updates[`rooms/${room.id}/status`] = 'completed';
+    updates[`rooms/${room.id}/currentPlayerId`] = null;
+    updates[`rooms/${room.id}/timerEndTime`] = null;
+    await update(ref(db), updates);
   };
 
   const handleStartReAuction = async () => {
     const nominatedPlayers = players.filter(p => p.status === 'unsold' && p.isNominated);
     if (nominatedPlayers.length === 0) return;
 
-    await updateDoc(doc(db, 'rooms', room.id), {
-      status: 're-auction-active',
-      currentPlayerId: nominatedPlayers[0].id,
-      timerEndTime: Date.now() + (room.settings.timerDuration * 1000),
-      auctionNumber: increment(1)
-    });
+    const updates: any = {};
+    updates[`rooms/${room.id}/status`] = 're-auction-active';
+    updates[`rooms/${room.id}/currentPlayerId`] = nominatedPlayers[0].id;
+    updates[`rooms/${room.id}/timerEndTime`] = Date.now() + (room.settings.timerDuration * 1000);
+    updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
+    updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/status`] = 'current';
+    updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/currentBid`] = nominatedPlayers[0].basePrice;
 
-    await updateDoc(doc(db, 'rooms', room.id, 'players', nominatedPlayers[0].id), {
-      status: 'current',
-      currentBid: nominatedPlayers[0].basePrice
-    });
+    await update(ref(db), updates);
   };
 
   return (

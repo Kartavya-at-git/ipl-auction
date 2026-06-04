@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { onAuthStateChanged, signInAnonymously, type User } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, type User } from 'firebase/auth';
 import { auth, firebaseInitialized } from '../lib/firebase';
 
 export const useAuth = () => {
@@ -20,12 +20,13 @@ export const useAuth = () => {
     return unsubscribe;
   }, []);
 
-  const loginAnonymously = async () => {
+  const loginWithGoogle = async () => {
     if (!firebaseInitialized || !auth) {
       throw new Error("Firebase is not initialized. Please check your .env file.");
     }
     try {
-      const result = await signInAnonymously(auth);
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
       return result.user;
     } catch (error) {
       console.error("Auth error:", error);
@@ -33,5 +34,5 @@ export const useAuth = () => {
     }
   };
 
-  return { user, loading, loginAnonymously, firebaseInitialized };
+  return { user, loading, loginWithGoogle, firebaseInitialized };
 };

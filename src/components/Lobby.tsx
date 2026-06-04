@@ -1,6 +1,6 @@
 import { Users, ShieldCheck, Play } from 'lucide-react';
 import type { Room, Participant } from '../types';
-import { doc, updateDoc } from 'firebase/firestore';
+import { ref, update } from 'firebase/database';
 import { db } from '../lib/firebase';
 
 interface LobbyProps {
@@ -11,9 +11,9 @@ interface LobbyProps {
 
 const Lobby = ({ room, participants, isHost }: LobbyProps) => {
   const handleStartSetup = async () => {
-    await updateDoc(doc(db, 'rooms', room.id), {
-      status: 'setup'
-    });
+    const updates: any = {};
+    updates[`rooms/${room.id}/status`] = 'setup';
+    await update(ref(db), updates);
   };
 
   return (

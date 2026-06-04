@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import type { Room, Player, Team } from '../types';
-import { doc, runTransaction, updateDoc, increment, arrayUnion } from 'firebase/firestore';
+import { ref, runTransaction, update } from 'firebase/database';
 import { db } from '../lib/firebase';
 import { getNextBid } from '../utils/bidding';
 import { formatCurrency } from '../utils/helpers';
@@ -15,9 +15,10 @@ interface AuctionDashboardProps {
   recentBids: Bid[];
   isHost: boolean;
   currentUserUid: string;
+  serverTimeOffset: number;
 }
 
-const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isHost, currentUserUid }: AuctionDashboardProps) => {
+const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isHost, currentUserUid, serverTimeOffset }: AuctionDashboardProps) => {
   const [timeLeft, setTimeLeft] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -45,30 +46,66 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     }
 
     const interval = setInterval(() => {
-      const now = Date.now();
+      const now = Date.now() + serverTimeOffset;
       const end = room.timerEndTime!;
       const diff = Math.max(0, Math.floor((end - now) / 1000));
       setTimeLeft(diff);
 
-      if (diff === 0 && isHost && room.status === 'active') {
+      if (diff === 0 && room.status === 'active') {
         clearInterval(interval);
         if (timerEndProcessed.current !== end) {
           timerEndProcessed.current = end;
+          // Auto-trigger transaction on 0
           handleTimerEnd();
         }
       }
     }, 100);
 
     return () => clearInterval(interval);
-  }, [room.status, room.timerEndTime, isHost]);
+  }, [room.status, room.timerEndTime, serverTimeOffset]);
 
   const handleTimerEnd = async () => {
-    if (!isHost) return;
+    // Both Host and Participants can attempt to execute the timer end to ensure it fires.
+    // The RTDB transaction will ensure it only actually updates once.
+    try {
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData || !currentData.players || !currentData.players[currentPlayer.id]) return currentData;
+        
+        const player = currentData.players[currentPlayer.id];
+        
+        // Anti-glitch: Ensure it's still current
+        if (player.status !== 'current') return currentData; // Already processed
 
-    if (highestBidderTeam) {
-      await handleSold();
-    } else {
-      await handleUnsold();
+        if (player.highestBidderTeamId) {
+          // Sold Logic
+          player.status = 'sold';
+          player.soldPrice = player.currentBid;
+          player.teamId = player.highestBidderTeamId;
+          
+          if (currentData.teams && currentData.teams[player.highestBidderTeamId]) {
+            currentData.teams[player.highestBidderTeamId].purseBalance -= player.currentBid;
+            currentData.teams[player.highestBidderTeamId].playerCount += 1;
+          }
+        } else {
+          // Unsold Logic
+          player.status = 'unsold';
+        }
+        
+        currentData.status = 'paused';
+        currentData.timerEndTime = null;
+        player.timerEndTime = null;
+
+        return currentData;
+      });
+
+      // Auto-advance after delay (handled by host)
+      if (isHost) {
+        setTimeout(async () => {
+          await handleNextPlayer();
+        }, 2000);
+      }
+    } catch (err) {
+      console.error("Timer End Transaction failed", err);
     }
   };
 
@@ -107,48 +144,47 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     setError('');
 
     try {
-      await runTransaction(db, async (transaction) => {
-        const playerRef = doc(db, 'rooms', room.id, 'players', currentPlayer.id);
-        const teamRef = doc(db, 'rooms', room.id, 'teams', userTeam.id);
-        
-        const playerSnap = await transaction.get(playerRef);
-        if (!playerSnap.exists()) throw new Error("Player not found");
-        
-        const teamSnap = await transaction.get(teamRef);
-        if (!teamSnap.exists()) throw new Error("Team not found");
-
-        const playerData = playerSnap.data() as Player;
-        const teamData = teamSnap.data() as Team;
-
-        if (playerData.status !== 'current') throw new Error("Auction not active for this player");
-        if (playerData.highestBidderTeamId === userTeam.id) throw new Error("Already highest bidder");
-
-        // Calculate next bid again inside transaction
-        const currentNextBid = playerData.highestBidderTeamId 
-          ? getNextBid(playerData.currentBid) 
-          : playerData.basePrice;
-
-        // Secure server-side purse and squad check
-        if (teamData.purseBalance < currentNextBid) {
-          throw new Error("Insufficient purse balance");
-        }
-        if (teamData.playerCount >= 25) {
-          throw new Error("Squad limit reached");
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData || !currentData.players || !currentData.players[currentPlayer.id] || !currentData.teams || !currentData.teams[userTeam.id]) {
+          return; // Abort
         }
 
-        const newTimer = Date.now() + (room.settings.timerDuration * 1000);
+        const player = currentData.players[currentPlayer.id];
+        const team = currentData.teams[userTeam.id];
 
-        // ATOMIC UPDATE: Write everything to the Player document
-        transaction.update(playerRef, {
-          currentBid: currentNextBid,
-          highestBidderTeamId: userTeam.id,
-          timerEndTime: newTimer,
-          bidHistory: arrayUnion({
-            amount: currentNextBid,
-            teamId: userTeam.id,
-            timestamp: Date.now()
-          })
-        });
+        // 1. Time Check (Anti-glitch)
+        const serverTime = Date.now() + serverTimeOffset;
+        if (currentData.timerEndTime && serverTime >= currentData.timerEndTime) {
+          return; // Too late, timer ended
+        }
+
+        if (player.status !== 'current') return;
+        if (player.highestBidderTeamId === userTeam.id) return;
+
+        const currentNextBid = player.highestBidderTeamId ? getNextBid(player.currentBid) : player.basePrice;
+
+        // 2. Purse & Squad Check
+        if (team.purseBalance < currentNextBid) return;
+        if (team.playerCount >= 25) return;
+
+        // 3. Timer Extension (+10 seconds from now)
+        const newTimer = serverTime + 10000;
+
+        player.currentBid = currentNextBid;
+        player.highestBidderTeamId = userTeam.id;
+        
+        currentData.timerEndTime = newTimer;
+        player.timerEndTime = newTimer;
+
+        if (!player.bidHistory) player.bidHistory = {};
+        const bidId = `bid_${serverTime}_${userTeam.id}`;
+        player.bidHistory[bidId] = {
+          amount: currentNextBid,
+          teamId: userTeam.id,
+          timestamp: serverTime
+        };
+
+        return currentData;
       });
     } catch (err: any) {
       setError(err.message || 'Bid failed');
@@ -159,122 +195,104 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   };
 
   const handleSold = async () => {
+    // No longer needed as manual button, handled by handleTimerEnd automation,
+    // but kept as a force-trigger for the host
     if (!highestBidderTeam) return;
-
-    setLoading(true);
-    try {
-      await runTransaction(db, async (transaction) => {
-        const playerRef = doc(db, 'rooms', room.id, 'players', currentPlayer.id);
-        const teamRef = doc(db, 'rooms', room.id, 'teams', highestBidderTeam.id);
-        const roomRef = doc(db, 'rooms', room.id);
-        
-        // Firestore transactions MUST perform all reads before writes
-        await transaction.get(playerRef);
-        await transaction.get(teamRef);
-        await transaction.get(roomRef);
-
-        transaction.update(playerRef, {
-          status: 'sold',
-          soldPrice: currentPlayer.currentBid,
-          teamId: highestBidderTeam.id
-        });
-
-        transaction.update(teamRef, {
-          purseBalance: increment(-currentPlayer.currentBid),
-          playerCount: increment(1)
-        });
-
-        transaction.update(roomRef, {
-          timerEndTime: null,
-          status: 'paused' // Temporarily pause during transition
-        });
-      });
-
-      // Auto-advance after delay
-      setTimeout(async () => {
-        await handleNextPlayer();
-      }, 2000);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+    await handleTimerEnd();
   };
 
   const handleUnsold = async () => {
-    setLoading(true);
-    try {
-      await updateDoc(doc(db, 'rooms', room.id, 'players', currentPlayer.id), {
-        status: 'unsold'
-      });
-      await updateDoc(doc(db, 'rooms', room.id), {
-        timerEndTime: null,
-        status: 'paused'
-      });
-
-      // Auto-advance after delay
-      setTimeout(async () => {
-        await handleNextPlayer();
-      }, 2000);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+    // No longer needed as manual button, handled by handleTimerEnd automation,
+    // but kept as a force-trigger for the host
+    await handleTimerEnd();
   };
 
   const handleNextPlayer = async () => {
-    // If player is still active and not sold, mark as unsold first
-    if (currentPlayer.status === 'current' && !highestBidderTeam) {
-      await updateDoc(doc(db, 'rooms', room.id, 'players', currentPlayer.id), {
-        status: 'unsold'
-      });
-    }
-
     const isReAuction = room.status === 're-auction-active';
     const availablePlayers = isReAuction 
       ? players.filter(p => p.status === 'unsold' && p.isNominated)
       : players.filter(p => (p.status === 'upcoming' || p.status === 'current') && p.id !== currentPlayer.id);
     
-    const nextPlayer = availablePlayers[0]; // Get the very next one from the filtered upcoming list
+    const nextPlayer = availablePlayers[0];
+
+    const updates: any = {};
+    
+    if (currentPlayer.status === 'current' && !highestBidderTeam) {
+       updates[`rooms/${room.id}/players/${currentPlayer.id}/status`] = 'unsold';
+    }
 
     if (!nextPlayer) {
       if (room.status === 'active') {
-        await updateDoc(doc(db, 'rooms', room.id), {
-          status: 're-auction-setup',
-          currentPlayerId: null,
-          timerEndTime: Date.now() + (5 * 60 * 1000)
-        });
+        updates[`rooms/${room.id}/status`] = 're-auction-setup';
+        updates[`rooms/${room.id}/currentPlayerId`] = null;
+        updates[`rooms/${room.id}/timerEndTime`] = Date.now() + serverTimeOffset + (5 * 60 * 1000);
       } else {
-        await updateDoc(doc(db, 'rooms', room.id), {
-          status: 'completed',
-          currentPlayerId: null
-        });
+        updates[`rooms/${room.id}/status`] = 'completed';
+        updates[`rooms/${room.id}/currentPlayerId`] = null;
       }
+      await update(ref(db), updates);
       return;
     }
 
-    await updateDoc(doc(db, 'rooms', room.id), {
-      currentPlayerId: nextPlayer.id,
-      status: room.status === 're-auction-active' ? 're-auction-active' : 'active',
-      timerEndTime: Date.now() + (room.settings.timerDuration * 1000),
-      auctionNumber: increment(1)
-    });
+    updates[`rooms/${room.id}/currentPlayerId`] = nextPlayer.id;
+    updates[`rooms/${room.id}/status`] = room.status === 're-auction-active' ? 're-auction-active' : 'active';
+    updates[`rooms/${room.id}/timerEndTime`] = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
+    updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
+    
+    updates[`rooms/${room.id}/players/${nextPlayer.id}/status`] = 'current';
+    updates[`rooms/${room.id}/players/${nextPlayer.id}/currentBid`] = nextPlayer.basePrice;
 
-    await updateDoc(doc(db, 'rooms', room.id, 'players', nextPlayer.id), {
-      status: 'current',
-      currentBid: nextPlayer.basePrice
-    });
+    await update(ref(db), updates);
   };
 
   const togglePause = async () => {
     const newStatus = room.status === 'active' ? 'paused' : 'active';
-    const newTimer = newStatus === 'active' ? Date.now() + (room.settings.timerDuration * 1000) : null;
+    const newTimer = newStatus === 'active' ? Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000) : null;
     
-    await updateDoc(doc(db, 'rooms', room.id), {
-      status: newStatus,
-      timerEndTime: newTimer
-    });
+    const updates: any = {};
+    updates[`rooms/${room.id}/status`] = newStatus;
+    updates[`rooms/${room.id}/timerEndTime`] = newTimer;
+    await update(ref(db), updates);
+  };
+
+  const handleResetPlayer = async () => {
+    if (!isHost || loading) return;
+    if (!confirm('Reset this player to CURRENT? (Purse and stats will be reverted)')) return;
+
+    setLoading(true);
+    try {
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData || !currentData.players || !currentData.players[currentPlayer.id]) return currentData;
+        
+        const player = currentData.players[currentPlayer.id];
+        
+        // Revert Team Purse if sold
+        if (player.status === 'sold' && player.teamId && currentData.teams && currentData.teams[player.teamId]) {
+          const team = currentData.teams[player.teamId];
+          team.purseBalance += (player.soldPrice || 0);
+          team.playerCount -= 1;
+        }
+
+        // Reset Player
+        player.status = 'current';
+        player.soldPrice = null;
+        player.teamId = null;
+        player.highestBidderTeamId = null;
+        player.currentBid = 0;
+        player.bidHistory = null;
+        
+        // Reset Room
+        currentData.status = 'active';
+        currentData.timerEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
+        player.timerEndTime = currentData.timerEndTime;
+
+        return currentData;
+      });
+    } catch (err) {
+      console.error("Reset failed", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -366,38 +384,46 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
 
             {/* Host Action Overlay */}
             {isHost && (
-              <div className="p-6 bg-ipl-navy border-t border-ipl-gold/20 grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="p-4 bg-ipl-navy border-t border-ipl-gold/20 grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-4">
                 <button 
                   onClick={handleSold}
                   disabled={!highestBidderTeam || loading}
-                  className="flex flex-col items-center justify-center gap-1 p-4 bg-green-600/10 border border-green-600/30 rounded-xl text-green-500 hover:bg-green-600 hover:text-white transition-all disabled:opacity-20"
+                  className="flex flex-col items-center justify-center gap-1 p-3 bg-green-600/10 border border-green-600/30 rounded-xl text-green-500 hover:bg-green-600 hover:text-white transition-all disabled:opacity-20"
                 >
-                  <CheckCircle size={24} />
-                  <span className="text-xs font-black uppercase">Sold</span>
+                  <CheckCircle size={20} />
+                  <span className="text-[10px] font-black uppercase">Sold</span>
                 </button>
                 <button 
                   onClick={handleUnsold}
                   disabled={!!highestBidderTeam || loading}
-                  className="flex flex-col items-center justify-center gap-1 p-4 bg-red-600/10 border border-red-600/30 rounded-xl text-red-500 hover:bg-red-600 hover:text-white transition-all disabled:opacity-20"
+                  className="flex flex-col items-center justify-center gap-1 p-3 bg-red-600/10 border border-red-600/30 rounded-xl text-red-500 hover:bg-red-600 hover:text-white transition-all disabled:opacity-20"
                 >
-                  <XCircle size={24} />
-                  <span className="text-xs font-black uppercase">Unsold</span>
+                  <XCircle size={20} />
+                  <span className="text-[10px] font-black uppercase">Unsold</span>
+                </button>
+                <button 
+                  onClick={handleResetPlayer}
+                  disabled={currentPlayer.status === 'current' || loading}
+                  className="flex flex-col items-center justify-center gap-1 p-3 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all disabled:opacity-20"
+                >
+                  <History size={20} />
+                  <span className="text-[10px] font-black uppercase">Reset</span>
                 </button>
                 <button 
                   onClick={togglePause}
                   disabled={loading}
-                  className="flex flex-col items-center justify-center gap-1 p-4 bg-ipl-gold/10 border border-ipl-gold/30 rounded-xl text-ipl-gold hover:bg-ipl-gold hover:text-ipl-navy transition-all"
+                  className="flex flex-col items-center justify-center gap-1 p-3 bg-ipl-gold/10 border border-ipl-gold/30 rounded-xl text-ipl-gold hover:bg-ipl-gold hover:text-ipl-navy transition-all"
                 >
-                  {room.status === 'active' ? <Pause size={24} /> : <Play size={24} />}
-                  <span className="text-xs font-black uppercase">{room.status === 'active' ? 'Pause' : 'Resume'}</span>
+                  {room.status === 'active' ? <Pause size={20} /> : <Play size={20} />}
+                  <span className="text-[10px] font-black uppercase">{room.status === 'active' ? 'Pause' : 'Resume'}</span>
                 </button>
                 <button 
                   onClick={handleNextPlayer}
                   disabled={(currentPlayer.status === 'current' && !!highestBidderTeam) || loading}
-                  className="flex flex-col items-center justify-center gap-1 p-4 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all disabled:opacity-20"
+                  className="flex flex-col items-center justify-center gap-1 p-3 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all disabled:opacity-20"
                 >
-                  <SkipForward size={24} />
-                  <span className="text-xs font-black uppercase">Next</span>
+                  <SkipForward size={20} />
+                  <span className="text-[10px] font-black uppercase">Next</span>
                 </button>
               </div>
             )}

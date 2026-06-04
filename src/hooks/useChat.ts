@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { collection, query, orderBy, limit, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
+import { ref, onValue, push, serverTimestamp, query, limitToLast } from 'firebase/database';
 import { db } from '../lib/firebase';
 
 export interface ChatMessage {
@@ -19,14 +19,19 @@ export const useChat = (roomId: string) => {
   useEffect(() => {
     if (!roomId) return;
 
-    const chatQuery = query(
-      collection(db, 'rooms', roomId, 'messages'),
-      orderBy('timestamp', 'asc'),
-      limit(100)
-    );
+    const chatRef = query(ref(db, `rooms/${roomId}/messages`), limitToLast(100));
 
-    const unsubscribe = onSnapshot(chatQuery, (snapshot) => {
-      setMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatMessage)));
+    const unsubscribe = onValue(chatRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        const msgList = Object.keys(data).map(key => ({
+          id: key,
+          ...data[key]
+        })).sort((a, b) => a.timestamp - b.timestamp);
+        setMessages(msgList);
+      } else {
+        setMessages([]);
+      }
       setLoading(false);
     });
 
@@ -36,7 +41,8 @@ export const useChat = (roomId: string) => {
   const sendMessage = async (text: string, senderUid: string, senderName: string, teamId: string | null, teamColor: string | null) => {
     if (!text.trim()) return;
 
-    await addDoc(collection(db, 'rooms', roomId, 'messages'), {
+    const messagesRef = ref(db, `rooms/${roomId}/messages`);
+    await push(messagesRef, {
       text,
       senderUid,
       senderName,

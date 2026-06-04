@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CheckCircle2, ShieldAlert, Loader2 } from 'lucide-react';
 import type { Room, Team, Participant } from '../types';
-import { doc, setDoc, updateDoc } from 'firebase/firestore';
+import { ref, runTransaction } from 'firebase/database';
 import { db } from '../lib/firebase';
 
 interface TeamSelectionProps {
@@ -31,32 +31,70 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
   const userTeam = teams.find(t => t.ownerUid === currentUserUid);
 
   const selectTeam = async (teamInfo: typeof IPL_TEAMS[0]) => {
-    console.log("Attempting to select team:", teamInfo.id);
     if (selectingId || userTeam) return;
     
     setSelectingId(teamInfo.id);
     setError('');
 
     try {
-      const teamRef = doc(db, 'rooms', room.id, 'teams', teamInfo.id);
-      await setDoc(teamRef, {
-        id: teamInfo.id,
-        name: teamInfo.name,
-        color: teamInfo.color,
-        ownerUid: currentUserUid,
-        initialPurse: room.settings.initialPurse,
-        purseBalance: room.settings.initialPurse,
-        playerCount: 0
-      });
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData) return;
+        if (!currentData.teams) currentData.teams = {};
+        
+        // Ensure team is not already taken
+        if (currentData.teams[teamInfo.id]) {
+          return; // Abort
+        }
 
-      const participantRef = doc(db, 'rooms', room.id, 'participants', currentUserUid);
-      await updateDoc(participantRef, {
-        teamId: teamInfo.id
+        currentData.teams[teamInfo.id] = {
+          id: teamInfo.id,
+          name: teamInfo.name,
+          color: teamInfo.color,
+          ownerUid: currentUserUid,
+          initialPurse: room.settings.initialPurse,
+          purseBalance: room.settings.initialPurse,
+          playerCount: 0
+        };
+
+        if (!currentData.participants) currentData.participants = {};
+        if (currentData.participants[currentUserUid]) {
+          currentData.participants[currentUserUid].teamId = teamInfo.id;
+        }
+
+        return currentData;
       });
-      console.log("Team selected successfully:", teamInfo.id);
     } catch (err: any) {
       console.error("Team selection failed:", err);
-      setError('Failed to select team. Please try again.');
+      setError(err.message || 'Failed to select team. Please try again.');
+      setSelectingId(null);
+    }
+  };
+
+  const handleResetTeam = async () => {
+    if (!userTeam || selectingId) return;
+    setSelectingId(userTeam.id);
+    setError('');
+
+    try {
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData) return;
+        
+        // Remove team ownership
+        if (currentData.teams && currentData.teams[userTeam.id]) {
+          delete currentData.teams[userTeam.id];
+        }
+
+        // Update participant
+        if (currentData.participants && currentData.participants[currentUserUid]) {
+          currentData.participants[currentUserUid].teamId = null;
+        }
+
+        return currentData;
+      });
+      setSelectingId(null);
+    } catch (err: any) {
+      console.error("Team reset failed:", err);
+      setError('Failed to reset team selection.');
       setSelectingId(null);
     }
   };
@@ -95,6 +133,14 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
           className="w-full py-4 bg-ipl-gold text-ipl-navy font-black rounded-xl hover:bg-ipl-gold/90 transition-all shadow-lg"
         >
           ENTER AUCTION ROOM
+        </button>
+
+        <button
+          onClick={handleResetTeam}
+          disabled={!!selectingId}
+          className="w-full py-3 bg-white/5 border border-white/10 text-white/60 font-bold rounded-xl hover:bg-white/10 transition-all text-xs uppercase tracking-widest"
+        >
+          {selectingId ? 'Resetting...' : 'Choose Another Team'}
         </button>
       </div>
     );

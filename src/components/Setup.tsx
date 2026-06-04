@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Upload, Users, ListOrdered, Play, Loader2 } from 'lucide-react';
 import type { Room, Participant, Team, Player } from '../types';
-import { doc, updateDoc, writeBatch } from 'firebase/firestore';
+import { ref, update } from 'firebase/database';
 import { db } from '../lib/firebase';
 import * as XLSX from 'xlsx';
 
@@ -31,15 +31,22 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
       const jsonData = XLSX.utils.sheet_to_json(worksheet) as any[];
 
-      const batch = writeBatch(db);
+      const updates: any = {};
       
       jsonData.forEach((row, index) => {
         const playerId = `player_${Date.now()}_${index}`;
-        const playerRef = doc(db, 'rooms', room.id, 'players', playerId);
         
-        batch.set(playerRef, {
+        // Robust base price parsing
+        let rawPrice = row['Base Price (₹)'] || row.BasePrice || row.basePrice || 0;
+        if (typeof rawPrice === 'string') {
+          // Remove currency symbols, commas, and spaces
+          rawPrice = rawPrice.replace(/[^\d.]/g, '');
+        }
+        const basePrice = parseFloat(rawPrice) || 0;
+
+        updates[`rooms/${room.id}/players/${playerId}`] = {
           name: row['Player Name'] || row.Name || row.name || 'Unknown Player',
-          basePrice: Number(row['Base Price (₹)'] || row.BasePrice || row.basePrice || 0),
+          basePrice: basePrice,
           role: row.Role || row.role || '',
           country: row.Country || row.country || '',
           category: row.Category || row.category || 'General',
@@ -49,10 +56,10 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
           soldPrice: null,
           teamId: null,
           order: index + 1
-        });
+        };
       });
 
-      await batch.commit();
+      await update(ref(db), updates);
     } catch (err: any) {
       setError('Failed to parse Excel file');
       console.error(err);
@@ -71,18 +78,17 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
       return;
     }
 
-    await updateDoc(doc(db, 'rooms', room.id), {
-      status: 'active',
-      currentPlayerId: players[0].id,
-      auctionNumber: 1
-    });
-
     const nextEndTime = Date.now() + (room.settings.timerDuration * 1000);
-    await updateDoc(doc(db, 'rooms', room.id, 'players', players[0].id), {
-      status: 'current',
-      currentBid: players[0].basePrice,
-      timerEndTime: nextEndTime
-    });
+    
+    const updates: any = {};
+    updates[`rooms/${room.id}/status`] = 'active';
+    updates[`rooms/${room.id}/currentPlayerId`] = players[0].id;
+    updates[`rooms/${room.id}/auctionNumber`] = 1;
+    updates[`rooms/${room.id}/players/${players[0].id}/status`] = 'current';
+    updates[`rooms/${room.id}/players/${players[0].id}/currentBid`] = players[0].basePrice;
+    updates[`rooms/${room.id}/players/${players[0].id}/timerEndTime`] = nextEndTime;
+
+    await update(ref(db), updates);
   };
 
   return (

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Trophy, Plus, LogIn } from 'lucide-react';
-import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { ref, set, get, child, serverTimestamp } from 'firebase/database';
 import { db } from '../lib/firebase';
 import { useAuth } from '../hooks/useAuth';
 import { generateRoomCode } from '../utils/helpers';
@@ -12,7 +12,7 @@ const Landing = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const { loginAnonymously, firebaseInitialized } = useAuth();
+  const { user, loginWithGoogle, firebaseInitialized } = useAuth();
 
   if (!firebaseInitialized) {
     return (
@@ -42,12 +42,12 @@ const Landing = () => {
     setError('');
 
     try {
-      const user = await loginAnonymously();
+      const currentUser = user || await loginWithGoogle();
       const newRoomCode = generateRoomCode();
-      const roomRef = doc(db, 'rooms', newRoomCode);
+      const roomRef = ref(db, `rooms/${newRoomCode}`);
 
-      await setDoc(roomRef, {
-        hostId: user.uid,
+      await set(roomRef, {
+        hostId: currentUser.uid,
         status: 'waiting',
         currentPlayerId: null,
         timerEndTime: null,
@@ -57,18 +57,17 @@ const Landing = () => {
           timerDuration: 15,
           availableTeams: ['MI', 'CSK', 'RCB', 'KKR', 'SRH', 'GT', 'LSG', 'RR', 'DC', 'PBKS']
         },
-        createdAt: serverTimestamp()
-      });
-
-      // Add host as participant
-      const participantRef = doc(db, 'rooms', newRoomCode, 'participants', user.uid);
-      await setDoc(participantRef, {
-        uid: user.uid,
-        displayName: name,
-        role: 'host',
-        teamId: null,
-        isOnline: true,
-        lastActive: serverTimestamp()
+        createdAt: serverTimestamp(),
+        participants: {
+          [currentUser.uid]: {
+            uid: currentUser.uid,
+            displayName: name,
+            role: 'host',
+            teamId: null,
+            isOnline: true,
+            lastActive: serverTimestamp()
+          }
+        }
       });
 
       navigate(`/room/${newRoomCode}`);
@@ -91,22 +90,23 @@ const Landing = () => {
 
     try {
       const upperCode = roomCode.trim().toUpperCase();
-      const roomSnap = await getDoc(doc(db, 'rooms', upperCode));
+      const roomSnap = await get(child(ref(db), `rooms/${upperCode}`));
 
       if (!roomSnap.exists()) {
         setError('Room not found');
+        setLoading(false);
         return;
       }
 
-      const user = await loginAnonymously();
+      const currentUser = user || await loginWithGoogle();
       
       // Add participant
-      const participantRef = doc(db, 'rooms', upperCode, 'participants', user.uid);
-      const partSnap = await getDoc(participantRef);
+      const participantRef = ref(db, `rooms/${upperCode}/participants/${currentUser.uid}`);
+      const partSnap = await get(participantRef);
 
       if (!partSnap.exists()) {
-        await setDoc(participantRef, {
-          uid: user.uid,
+        await set(participantRef, {
+          uid: currentUser.uid,
           displayName: name,
           role: 'participant',
           teamId: null,
