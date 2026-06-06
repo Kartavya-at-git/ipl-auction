@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CheckCircle2, ShieldAlert, Loader2 } from 'lucide-react';
 import type { Room, Team, Participant } from '../types';
-import { ref, runTransaction } from 'firebase/database';
+import { ref, runTransaction, update } from 'firebase/database';
 import { db } from '../lib/firebase';
 
 interface TeamSelectionProps {
@@ -32,6 +32,11 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
 
   const selectTeam = async (teamInfo: typeof IPL_TEAMS[0]) => {
     if (selectingId || userTeam) return;
+
+    if (room.status !== 'waiting' && room.status !== 'setup') {
+      setError('Cannot select a team after the auction has started.');
+      return;
+    }
     
     setSelectingId(teamInfo.id);
     setError('');
@@ -73,6 +78,17 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
 
   const handleResetTeam = async () => {
     if (!userTeam || selectingId) return;
+
+    if (room.status !== 'waiting' && room.status !== 'setup') {
+      setError('Cannot change teams after the auction has started.');
+      return;
+    }
+
+    if (userTeam.playerCount > 0) {
+      setError('Cannot change teams because you have already drafted players.');
+      return;
+    }
+
     setSelectingId(userTeam.id);
     setError('');
 
@@ -80,6 +96,14 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
       await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
         if (!currentData) return;
         
+        // Double-check inside transaction for safety
+        if (currentData.status !== 'waiting' && currentData.status !== 'setup') {
+           throw new Error('Auction already started');
+        }
+        if (currentData.teams && currentData.teams[userTeam.id] && currentData.teams[userTeam.id].playerCount > 0) {
+           throw new Error('Players already drafted');
+        }
+
         // Remove team ownership
         if (currentData.teams && currentData.teams[userTeam.id]) {
           delete currentData.teams[userTeam.id];
@@ -95,7 +119,7 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
       setSelectingId(null);
     } catch (err: any) {
       console.error("Team reset failed:", err);
-      setError('Failed to reset team selection.');
+      setError(err.message || 'Failed to reset team selection.');
       setSelectingId(null);
     }
   };
@@ -148,19 +172,29 @@ const TeamSelection = ({ room, teams, participants, currentUserUid, onEnterAucti
   }
 
   if (availableTeams.length === 0) {
+    const handleContinueAsSpectator = async () => {
+      try {
+        const updates: any = {};
+        updates[`rooms/${room.id}/participants/${currentUserUid}/role`] = 'spectator';
+        await update(ref(db), updates);
+        
+        if (onEnterAuction) {
+          onEnterAuction();
+        } else {
+          window.location.reload();
+        }
+      } catch (err) {
+        console.error("Failed to set spectator role:", err);
+      }
+    };
+
     return (
       <div className="max-w-md mx-auto mt-20 p-8 bg-ipl-navy border border-red-500/20 rounded-2xl text-center space-y-4">
         <ShieldAlert className="text-red-500 mx-auto" size={48} />
         <h2 className="text-xl font-bold text-white">Auction is Full</h2>
         <p className="text-ipl-gold/40 text-sm">All 10 IPL franchises have been claimed. You can still watch the auction as a spectator.</p>
         <button
-          onClick={() => {
-            if (onEnterAuction) {
-              onEnterAuction();
-            } else {
-              window.location.reload();
-            }
-          }}
+          onClick={handleContinueAsSpectator}
           className="w-full mt-4 py-3 bg-white/10 text-white font-bold rounded-lg hover:bg-white/20 transition-colors"
         >
           Continue as Spectator

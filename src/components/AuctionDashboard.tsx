@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import type { Room, Player, Team } from '../types';
+import type { Room, Player, Team, Participant } from '../types';
 import { ref, runTransaction, update } from 'firebase/database';
 import { db } from '../lib/firebase';
 import { getNextBid } from '../utils/bidding';
@@ -12,13 +12,15 @@ interface AuctionDashboardProps {
   currentPlayer: Player;
   players: Player[];
   teams: Team[];
+  participants: Participant[];
   recentBids: Bid[];
   isHost: boolean;
   currentUserUid: string;
+  currentUserRole?: string;
   serverTimeOffset: number;
 }
 
-const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isHost, currentUserUid, serverTimeOffset }: AuctionDashboardProps) => {
+const AuctionDashboard = ({ room, currentPlayer, players, teams, participants, recentBids, isHost, currentUserUid, currentUserRole, serverTimeOffset }: AuctionDashboardProps) => {
   const [timeLeft, setTimeLeft] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -32,6 +34,10 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   const highestBidderTeam = teams.find(t => t.id === currentPlayer.highestBidderTeamId);
   const currentSetPlayers = players.filter(p => p.setNo === currentPlayer.setNo);
 
+  // Presence Detection
+  const hostParticipant = participants.find(p => p.uid === room.hostId);
+  const isHostOffline = hostParticipant && hostParticipant.isOnline === false;
+
   // Squad Limits
   const userTeamPlayers = userTeam ? players.filter(p => p.teamId === userTeam.id) : [];
   const userOsCount = userTeamPlayers.filter(p => p.country?.toLowerCase() !== 'india').length;
@@ -40,7 +46,8 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
 
   // Timer Logic
   useEffect(() => {
-    if (room.status !== 'active' || !room.timerEndTime) {
+    const isActive = room.status === 'active' || room.status === 're-auction-active';
+    if (!isActive || !room.timerEndTime) {
       setTimeLeft(0);
       return;
     }
@@ -51,7 +58,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       const diff = Math.max(0, Math.floor((end - now) / 1000));
       setTimeLeft(diff);
 
-      if (diff === 0 && room.status === 'active') {
+      if (diff === 0 && isActive) {
         clearInterval(interval);
         if (timerEndProcessed.current !== end) {
           timerEndProcessed.current = end;
@@ -64,12 +71,29 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     return () => clearInterval(interval);
   }, [room.status, room.timerEndTime, serverTimeOffset]);
 
+  useEffect(() => {
+    const isActive = room.status === 'active' || room.status === 're-auction-active';
+    if (!isActive || !room.timerEndTime) return;
+
+    const now = Date.now() + serverTimeOffset;
+    const delay = Math.max(0, room.timerEndTime - now + 150);
+    const timeout = setTimeout(() => {
+      if (timerEndProcessed.current !== room.timerEndTime) {
+        timerEndProcessed.current = room.timerEndTime;
+        handleTimerEnd();
+      }
+    }, delay);
+
+    return () => clearTimeout(timeout);
+  }, [room.status, room.timerEndTime, serverTimeOffset]);
+
   const handleTimerEnd = async () => {
     try {
       const result = await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
-        if (!currentData || !currentData.players || !currentData.players[currentPlayer.id]) return currentData;
+        const currentPlayerId = currentData?.currentPlayerId || currentPlayer.id;
+        if (!currentData || !currentData.players || !currentData.players[currentPlayerId]) return currentData;
         
-        const player = currentData.players[currentPlayer.id];
+        const player = currentData.players[currentPlayerId];
         if (player.status !== 'current') return currentData;
 
         if (player.highestBidderTeamId) {
@@ -95,26 +119,23 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       if (isHost && result.committed) {
         setTimeout(async () => {
           await handleNextPlayer();
-        }, 2000);
+        }, 2200);
       }
     } catch (err) {
       console.error("Timer End Transaction failed", err);
     }
   };
 
-  // Dynamic Observer: Host automatically advances after Sold/Unsold
   useEffect(() => {
-    if (!isHost || (currentPlayer.status !== 'sold' && currentPlayer.status !== 'unsold')) return;
+    if (!isHost || room.status !== 'paused') return;
+    if (currentPlayer.status !== 'sold' && currentPlayer.status !== 'unsold') return;
 
     const timeout = setTimeout(async () => {
-      // Re-verify status hasn't changed (e.g. by Reset) before advancing
-      if (currentPlayer.status === 'sold' || currentPlayer.status === 'unsold') {
-        await handleNextPlayer();
-      }
-    }, 2000);
+      await handleNextPlayer();
+    }, 2200);
 
     return () => clearTimeout(timeout);
-  }, [currentPlayer.status, currentPlayer.id, isHost]);
+  }, [isHost, room.status, currentPlayer.status, currentPlayer.id]);
 
   // Cinematic Sound Effects
   useEffect(() => {
@@ -160,7 +181,8 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
       return;
     }
 
-    if (room.status !== 'active') {
+    const isAuctionRunning = room.status === 'active' || room.status === 're-auction-active';
+    if (!isAuctionRunning) {
       setError('Auction is paused');
       return;
     }
@@ -192,8 +214,8 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
         if (team.purseBalance < currentNextBid) return;
         if (team.playerCount >= 25) return;
 
-        // 3. Timer Extension (+30 seconds from now)
-        const newTimer = serverTime + 30000;
+        // 3. Timer Extension
+        const newTimer = serverTime + (room.settings.timerDuration * 1000);
 
         player.currentBid = currentNextBid;
         player.highestBidderTeamId = userTeam.id;
@@ -221,7 +243,8 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
   };
 
   const handlePassPlayer = async () => {
-    if (!userTeam || loading || room.status !== 'active' || timeLeft === 0) return;
+    const isAuctionRunning = room.status === 'active' || room.status === 're-auction-active';
+    if (!userTeam || loading || !isAuctionRunning || timeLeft === 0) return;
 
     setLoading(true);
     try {
@@ -234,21 +257,28 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
         if (!player.passes) player.passes = {};
         player.passes[userTeam.id] = true;
 
-        const activeTeams = Object.values(currentData.teams || {}).filter((t: any) => !!t.ownerUid).length;
+        // Consensus logic: Only count teams whose owners are actively online
+        const activeTeams = Object.values(currentData.teams || {}).filter((t: any) => {
+          const participant = currentData.participants ? currentData.participants[t.ownerUid] : null;
+          return !!t.ownerUid && participant && participant.isOnline === true;
+        }).length;
+
+        // Fallback: If for some reason activeTeams is 0 (all offline), avoid instant skip unless passCount > 0
+        const requiredTeams = Math.max(1, activeTeams);
         const passCount = Object.keys(player.passes).length;
 
-        // Consensus logic
         if (!player.highestBidderTeamId) {
-          // All active teams passed -> Unsold
-          if (passCount >= activeTeams) {
+          // All active online teams passed -> Unsold
+          if (passCount >= requiredTeams) {
             player.status = 'unsold';
             currentData.status = 'paused';
             currentData.timerEndTime = null;
+            player.timerEndTime = null;
           }
         } else {
           // Everyone except the highest bidder passed -> Sold
           const isLeaderPassing = !!player.passes[player.highestBidderTeamId];
-          const neededPasses = isLeaderPassing ? activeTeams : activeTeams - 1;
+          const neededPasses = isLeaderPassing ? requiredTeams : Math.max(1, requiredTeams - 1);
           
           if (passCount >= neededPasses) {
             player.status = 'sold';
@@ -262,6 +292,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
             
             currentData.status = 'paused';
             currentData.timerEndTime = null;
+            player.timerEndTime = null;
           }
         }
 
@@ -287,111 +318,146 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
     await handleTimerEnd();
   };
 
-  const handleNextPlayer = async () => {
-    const isReAuction = room.isReAuctionPhase;
-    
-    // Define the pool based on auction phase (Stable across pauses)
-    const playerPool = isReAuction 
-      ? [...players].filter(p => p.isNominated)
-        .sort((a, b) => {
-          const setA = a.setNo || 0;
-          const setB = b.setNo || 0;
-          if (setA !== setB) return setA - setB;
-          return a.order - b.order;
-        })
-      : [...players].sort((a, b) => {
-          const setA = a.setNo || 0;
-          const setB = b.setNo || 0;
-          if (setA !== setB) return setA - setB;
-          return a.order - b.order;
-        });
-
-    // Find the current player's index in the active pool
-    const currentPoolIndex = playerPool.findIndex(p => p.id === currentPlayer.id);
-    const nextPlayer = playerPool[currentPoolIndex + 1];
-
-    const updates: any = {};
-    
-    // Auto-unsold previous if moving past without bids in main auction
-    if (!isReAuction && currentPlayer.status === 'current' && !highestBidderTeam) {
-       updates[`rooms/${room.id}/players/${currentPlayer.id}/status`] = 'unsold';
-    }
-
-    if (!nextPlayer) {
-      if (!isReAuction) {
-        updates[`rooms/${room.id}/status`] = 're-auction-setup';
-        updates[`rooms/${room.id}/currentPlayerId`] = null;
-        updates[`rooms/${room.id}/timerEndTime`] = Date.now() + serverTimeOffset + (5 * 60 * 1000);
-      } else {
-        updates[`rooms/${room.id}/status`] = 'completed';
-        updates[`rooms/${room.id}/currentPlayerId`] = null;
-      }
-      await update(ref(db), updates);
-      return;
-    }
-
-
-    const nextEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
-
-    updates[`rooms/${room.id}/currentPlayerId`] = nextPlayer.id;
-    if (!isReAuction) updates[`rooms/${room.id}/currentIndex`] = currentPoolIndex + 1;
-    
-    updates[`rooms/${room.id}/status`] = isReAuction ? 're-auction-active' : 'active';
-    updates[`rooms/${room.id}/timerEndTime`] = nextEndTime;
-    updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
-    
-    updates[`rooms/${room.id}/players/${nextPlayer.id}/status`] = 'current';
-    updates[`rooms/${room.id}/players/${nextPlayer.id}/currentBid`] = nextPlayer.basePrice;
-    updates[`rooms/${room.id}/players/${nextPlayer.id}/timerEndTime`] = nextEndTime;
-
-    await update(ref(db), updates);
-  };
-
-  const togglePause = async () => {
-    const newStatus = room.status === 'active' ? 'paused' : 'active';
-    const newTimer = newStatus === 'active' ? Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000) : null;
-    
-    const updates: any = {};
-    updates[`rooms/${room.id}/status`] = newStatus;
-    updates[`rooms/${room.id}/timerEndTime`] = newTimer;
-    await update(ref(db), updates);
-  };
-
-  const handleResetPlayer = async () => {
-    if (!isHost || loading) return;
-    if (!confirm('Reset this player to CURRENT? (Purse and stats will be reverted)')) return;
-
+  const handleNextPlayer = async (fromSetBreak = false) => {
+    if (loading || (room.status === 'set-break' && !fromSetBreak)) return;
     setLoading(true);
+
     try {
       await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
-        if (!currentData || !currentData.players || !currentData.players[currentPlayer.id]) return currentData;
-        
-        const player = currentData.players[currentPlayer.id];
-        
-        // Revert Team Purse if sold
-        if (player.status === 'sold' && player.teamId && currentData.teams && currentData.teams[player.teamId]) {
-          const team = currentData.teams[player.teamId];
-          team.purseBalance += (player.soldPrice || 0);
-          team.playerCount -= 1;
+        if (!currentData || !currentData.players) return currentData;
+
+        if (isHost) {
+          const hostParticipant = currentData.participants?.[currentData.hostId];
+          if (hostParticipant?.isOnline === false) return currentData;
         }
 
-        // Reset Player
-        player.status = 'current';
-        player.soldPrice = null;
-        player.teamId = null;
-        player.highestBidderTeamId = null;
-        player.currentBid = 0;
-        player.bidHistory = null;
+        // Double check status inside transaction if not from set break
+        if (!fromSetBreak && currentData.status === 'set-break') return currentData;
+
+        const isReAuction = currentData.isReAuctionPhase;
+        const currentPlayerId = currentData.currentPlayerId || currentPlayer.id;
+        const curPlayer = currentData.players[currentPlayerId];
         
-        // Reset Room
-        currentData.status = 'active';
-        currentData.timerEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
-        player.timerEndTime = currentData.timerEndTime;
+        // 1. Auto-unsold previous if needed
+        if (curPlayer && curPlayer.status === 'current' && !curPlayer.highestBidderTeamId) {
+          curPlayer.status = 'unsold';
+        }
+
+        // 2. Filter available 'upcoming' players - Map keys to IDs for robustness
+        const upcomingPlayers = Object.entries(currentData.players || {})
+          .map(([id, player]: [string, any]) => ({ ...player, id }))
+          .filter((p: any) => p.status === 'upcoming' && p.id !== currentPlayerId);
+
+        if (upcomingPlayers.length === 0) {
+          if (!isReAuction) {
+            currentData.status = 're-auction-setup';
+            currentData.currentPlayerId = null;
+            currentData.timerEndTime = Date.now() + serverTimeOffset + (5 * 60 * 1000);
+          } else {
+            currentData.status = 'completed';
+            currentData.currentPlayerId = null;
+          }
+          return currentData;
+        }
+
+        // 3. "Bag Draw" Logic inside Transaction
+        let nextPlayerId: string | null = null;
+        const sameSetPlayers = upcomingPlayers.filter((p: any) => p.setNo === (curPlayer?.setNo || 1));
+
+        if (sameSetPlayers.length > 0) {
+          const picked: any = sameSetPlayers[Math.floor(Math.random() * sameSetPlayers.length)];
+          nextPlayerId = picked.id;
+        } else {
+          // Current set finished, check for "Pause Before Next Set"
+          // Skip check if we are explicitly resuming FROM a set break
+          if (currentData.pauseBeforeNextSet && !fromSetBreak) {
+            currentData.status = 'set-break';
+            currentData.timerEndTime = null;
+            return currentData; // Stop here, atomic pause!
+          }
+
+          // Move to next set randomly
+          const nextSetNos = [...new Set(upcomingPlayers.map((p: any) => p.setNo || 0))].sort((a, b) => a - b);
+          const nextSetNo = nextSetNos[0];
+          const nextSetPlayers = upcomingPlayers.filter((p: any) => (p.setNo || 0) === nextSetNo);
+          const picked: any = nextSetPlayers[Math.floor(Math.random() * nextSetPlayers.length)];
+          nextPlayerId = picked.id;
+        }
+
+        if (nextPlayerId) {
+          const nextEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
+          const nextAuctionNumber = (currentData.auctionNumber || 0) + 1;
+
+          currentData.currentPlayerId = nextPlayerId;
+          currentData.status = isReAuction ? 're-auction-active' : 'active';
+          currentData.timerEndTime = nextEndTime;
+          currentData.auctionNumber = nextAuctionNumber;
+          if (!isReAuction) currentData.currentIndex = (currentData.currentIndex || 0) + 1;
+
+          const dbNextPlayer = currentData.players[nextPlayerId];
+          dbNextPlayer.status = 'current';
+          dbNextPlayer.currentBid = dbNextPlayer.basePrice;
+          dbNextPlayer.timerEndTime = nextEndTime;
+          dbNextPlayer.auctionedOrder = nextAuctionNumber;
+          dbNextPlayer.highestBidderTeamId = null;
+          dbNextPlayer.passes = null; // Ensure passes are cleared for the new player
+        }
 
         return currentData;
       });
     } catch (err) {
-      console.error("Reset failed", err);
+      console.error("Atomic Next Player failed", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const togglePause = async () => {
+    if (loading || (currentPlayer.status !== 'current' && (room.status === 'active' || room.status === 're-auction-active'))) return;
+    setLoading(true);
+    try {
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData) return currentData;
+        
+        const isReAuction = currentData.isReAuctionPhase;
+        const activeStatus = isReAuction ? 're-auction-active' : 'active';
+        const isCurrentlyActive = currentData.status === 'active' || currentData.status === 're-auction-active';
+        const newStatus = isCurrentlyActive ? 'paused' : activeStatus;
+        
+        currentData.status = newStatus;
+
+        if (newStatus === 'paused') {
+          currentData.pausedTimeLeft = timeLeft;
+          currentData.timerEndTime = null;
+        } else {
+          // FAIR PLAY KICKSTART: If resuming at less than 5s, reset to full 30s duration
+          const storedTime = currentData.pausedTimeLeft;
+          const resumeTimeLeft = (storedTime !== undefined && storedTime > 5) ? storedTime : (currentData.settings?.timerDuration || 30);
+          
+          currentData.timerEndTime = Date.now() + serverTimeOffset + (resumeTimeLeft * 1000);
+          currentData.pausedTimeLeft = null;
+        }
+        
+        return currentData;
+      });
+    } catch (err) {
+      console.error("Atomic Toggle Pause failed", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const togglePauseBeforeNextSet = async () => {
+    if (!isHost || loading) return;
+    setLoading(true);
+    try {
+      await runTransaction(ref(db, `rooms/${room.id}`), (currentData) => {
+        if (!currentData) return currentData;
+        currentData.pauseBeforeNextSet = !currentData.pauseBeforeNextSet;
+        return currentData;
+      });
+    } catch (err) {
+      console.error("Atomic Toggle Break failed", err);
     } finally {
       setLoading(false);
     }
@@ -521,15 +587,44 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
               </div>
             )}
 
-            {/* Bidding Controls */}
-            {!isHost && (
+            {/* Set Break Overlay */}
+            {room.status === 'set-break' && (
+              <div className="absolute inset-0 z-[100] flex flex-col items-center justify-center bg-ipl-navy/95 backdrop-blur-3xl rounded-2xl animate-in fade-in duration-500">
+                 <AlertTriangle size={64} className="text-ipl-gold mb-4 animate-pulse" />
+                 <h2 className="text-3xl font-black text-white uppercase italic tracking-tighter text-center px-4">Auction Paused By Admin</h2>
+                 <p className="text-ipl-gold/60 mt-2 font-bold uppercase tracking-widest text-center px-4">Contact Admin for more Info</p>
+                 {isHost && (
+                   <button 
+                     onClick={async () => {
+                       await update(ref(db), { [`rooms/${room.id}/pauseBeforeNextSet`]: false });
+                       await handleNextPlayer(true); // Explicitly from break
+                     }} 
+                     className="mt-8 px-8 py-3 bg-ipl-gold text-ipl-navy font-black uppercase rounded-lg hover:bg-ipl-gold/90 shadow-[0_0_20px_rgba(209,171,62,0.3)] transition-all active:scale-95"
+                   >
+                     Resume Auction (Start Next Set)
+                   </button>
+                 )}
+              </div>
+            )}
+
+            {/* Host Offline Overlay */}
+            {(room.status === 'active' || room.status === 're-auction-active' || room.status === 'paused') && isHostOffline && (
+              <div className="absolute inset-0 z-[110] flex flex-col items-center justify-center bg-ipl-navy/95 backdrop-blur-3xl rounded-2xl animate-in fade-in duration-500">
+                 <AlertTriangle size={64} className="text-red-500 mb-4 animate-pulse" />
+                 <h2 className="text-3xl font-black text-white uppercase italic tracking-tighter text-center px-4">Auctioneer Disconnected</h2>
+                 <p className="text-ipl-gold/60 mt-2 font-bold uppercase tracking-widest text-center px-4">Waiting for host to reconnect...</p>
+              </div>
+            )}
+
+            {/* Bidding Controls (Hidden for Host and Spectator) */}
+            {!isHost && currentUserRole !== 'spectator' && (
               <div className="p-6 bg-ipl-navy border-t border-ipl-gold/20 space-y-4">
                 {error && <div className="text-center text-red-400 text-sm font-bold bg-red-400/10 p-2 rounded border border-red-400/20">{error}</div>}
                 
                 <div className="flex gap-4">
                   <button
                     onClick={handlePlaceBid}
-                    disabled={loading || room.status !== 'active' || timeLeft === 0 || userTeam?.purseBalance! < nextBidAmount || currentPlayer.highestBidderTeamId === userTeam?.id || !!(currentPlayer.passes?.[userTeam?.id || ''])}
+                    disabled={loading || (room.status !== 'active' && room.status !== 're-auction-active') || timeLeft === 0 || userTeam?.purseBalance! < nextBidAmount || currentPlayer.highestBidderTeamId === userTeam?.id || !!(currentPlayer.passes?.[userTeam?.id || ''])}
                     className="flex-[2] group relative overflow-hidden bg-ipl-gold disabled:bg-gray-700 h-20 rounded-xl transition-all active:scale-95 shadow-lg"
                   >
                     <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
@@ -548,7 +643,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
 
                   <button
                     onClick={handlePassPlayer}
-                    disabled={loading || room.status !== 'active' || timeLeft === 0 || currentPlayer.highestBidderTeamId === userTeam?.id || !!(currentPlayer.passes?.[userTeam?.id || ''])}
+                    disabled={loading || (room.status !== 'active' && room.status !== 're-auction-active') || timeLeft === 0 || currentPlayer.highestBidderTeamId === userTeam?.id || !!(currentPlayer.passes?.[userTeam?.id || ''])}
                     className="flex-1 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white/10 transition-all disabled:opacity-20 flex flex-col items-center justify-center gap-1"
                   >
                     <XCircle size={24} className={currentPlayer.passes?.[userTeam?.id || ''] ? 'text-green-500' : 'text-red-500'} />
@@ -557,7 +652,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </div>
 
                 {/* Consensus Progress */}
-                {room.status === 'active' && (
+                {(room.status === 'active' || room.status === 're-auction-active') && (
                   <div className="flex items-center justify-between px-2">
                     <div className="flex items-center gap-2">
                       <span className="text-[8px] font-black text-white/20 uppercase">Interest Map:</span>
@@ -592,7 +687,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
               <div className="p-4 bg-ipl-navy border-t border-ipl-gold/20 grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-4">
                 <button 
                   onClick={handleSold}
-                  disabled={!highestBidderTeam || loading}
+                  disabled={!highestBidderTeam || loading || room.status === 'set-break'}
                   className="flex flex-col items-center justify-center gap-1 p-3 bg-green-600/10 border border-green-600/30 rounded-xl text-green-500 hover:bg-green-600 hover:text-white transition-all disabled:opacity-20"
                 >
                   <CheckCircle size={20} />
@@ -600,31 +695,33 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </button>
                 <button 
                   onClick={handleUnsold}
-                  disabled={!!highestBidderTeam || loading}
+                  disabled={!!highestBidderTeam || loading || room.status === 'set-break'}
                   className="flex flex-col items-center justify-center gap-1 p-3 bg-red-600/10 border border-red-600/30 rounded-xl text-red-500 hover:bg-red-600 hover:text-white transition-all disabled:opacity-20"
                 >
                   <XCircle size={20} />
                   <span className="text-[10px] font-black uppercase">Unsold</span>
                 </button>
                 <button 
-                  onClick={handleResetPlayer}
-                  disabled={currentPlayer.status === 'current' || loading}
-                  className="flex flex-col items-center justify-center gap-1 p-3 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all disabled:opacity-20"
+                  onClick={togglePauseBeforeNextSet}
+                  disabled={loading || room.status === 'set-break'}
+                  className={`flex flex-col items-center justify-center gap-1 p-3 rounded-xl transition-all disabled:opacity-20 ${room.pauseBeforeNextSet ? 'bg-ipl-gold text-ipl-navy' : 'bg-white/5 border border-white/10 text-white hover:bg-white hover:text-ipl-navy'}`}
                 >
-                  <History size={20} />
-                  <span className="text-[10px] font-black uppercase">Reset</span>
+                  <Pause size={20} />
+                  <span className="text-[8px] font-black uppercase text-center leading-none mt-1">
+                    {room.pauseBeforeNextSet ? 'Will Pause\nNext Set' : 'Pause Next\nSet'}
+                  </span>
                 </button>
                 <button 
                   onClick={togglePause}
-                  disabled={loading}
-                  className="flex flex-col items-center justify-center gap-1 p-3 bg-ipl-gold/10 border border-ipl-gold/30 rounded-xl text-ipl-gold hover:bg-ipl-gold hover:text-ipl-navy transition-all"
+                  disabled={loading || room.status === 'set-break'}
+                  className="flex flex-col items-center justify-center gap-1 p-3 bg-ipl-gold/10 border border-ipl-gold/30 rounded-xl text-ipl-gold hover:bg-ipl-gold hover:text-ipl-navy transition-all disabled:opacity-20"
                 >
-                  {room.status === 'active' ? <Pause size={20} /> : <Play size={20} />}
-                  <span className="text-[10px] font-black uppercase">{room.status === 'active' ? 'Pause' : 'Resume'}</span>
+                  {room.status === 'active' || room.status === 're-auction-active' ? <Pause size={20} /> : <Play size={20} />}
+                  <span className="text-[10px] font-black uppercase">{room.status === 'active' || room.status === 're-auction-active' ? 'Pause' : 'Resume'}</span>
                 </button>
                 <button 
-                  onClick={handleNextPlayer}
-                  disabled={(currentPlayer.status === 'current' && !!highestBidderTeam) || loading}
+                  onClick={() => handleNextPlayer()}
+                  disabled={(currentPlayer.status === 'current' && !!highestBidderTeam) || loading || room.status === 'set-break'}
                   className="flex flex-col items-center justify-center gap-1 p-3 bg-white/5 border border-white/10 rounded-xl text-white hover:bg-white hover:text-ipl-navy transition-all disabled:opacity-20"
                 >
                   <SkipForward size={20} />
@@ -688,7 +785,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                   Franchise Status
                 </h3>
                 <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
-                  {teams.sort((a, b) => b.purseBalance - a.purseBalance).map((team) => {
+                  {[...teams].sort((a, b) => b.purseBalance - a.purseBalance).map((team) => {
                     const teamPlayers = players.filter(p => p.teamId === team.id);
                     const osCount = teamPlayers.filter(p => p.country?.toLowerCase() !== 'india').length;
                     const isOverLimit = osCount > 8;
@@ -721,7 +818,7 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
               </div>
             </>
           ) : (
-            /* Current Set View */
+            /* Current Set View (Bag Draw Style) */
             <div className="bg-ipl-navy border border-ipl-gold/20 rounded-xl p-4 space-y-4 shadow-xl flex-1 flex flex-col min-h-0">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-black text-ipl-gold/60 uppercase tracking-widest flex items-center gap-2">
@@ -733,48 +830,87 @@ const AuctionDashboard = ({ room, currentPlayer, players, teams, recentBids, isH
                 </span>
               </div>
               
-              <div className="space-y-1.5 overflow-y-auto pr-2 custom-scrollbar max-h-[500px]">
-                {currentSetPlayers.map((player) => (
-                  <div 
-                    key={player.id} 
-                    className={`flex items-center justify-between p-2 rounded transition-all border ${
-                      player.id === currentPlayer.id 
-                        ? 'bg-ipl-gold/10 border-ipl-gold shadow-[0_0_10px_rgba(209,171,62,0.1)] scale-[1.02]' 
-                        : player.status === 'sold'
-                          ? 'bg-green-500/5 border-green-500/20 opacity-60'
-                          : player.status === 'unsold'
-                            ? 'bg-red-500/5 border-red-500/20 opacity-60'
-                            : 'bg-ipl-bg/30 border-white/5'
-                    }`}
-                  >
-                    <div className="flex flex-col min-w-0">
-                      <span className={`text-[10px] font-bold truncate ${player.id === currentPlayer.id ? 'text-white' : 'text-white/70'}`}>
-                        {player.name}
-                      </span>
-                      <span className="text-[8px] font-black uppercase text-white/30 tracking-tighter">
-                        {player.role} • {player.country}
-                      </span>
-                    </div>
-                    
-                    <div className="text-right shrink-0 ml-2">
-                      {player.status === 'sold' ? (
-                        <div className="flex flex-col items-end">
-                          <span className="text-[8px] font-black text-green-500 uppercase tracking-widest">SOLD</span>
-                          <span className="text-[9px] font-mono text-white/60">{formatCurrency(player.soldPrice || 0)}</span>
-                        </div>
-                      ) : player.status === 'unsold' ? (
-                        <span className="text-[8px] font-black text-red-500 uppercase tracking-widest">UNSOLD</span>
-                      ) : player.id === currentPlayer.id ? (
-                        <div className="flex items-center gap-1">
-                          <div className="w-1.5 h-1.5 rounded-full bg-ipl-gold animate-pulse" />
-                          <span className="text-[8px] font-black text-ipl-gold uppercase">CURRENT</span>
-                        </div>
-                      ) : (
-                        <span className="text-[9px] font-mono text-white/20">{formatCurrency(player.basePrice)}</span>
-                      )}
-                    </div>
+              <div className="space-y-4 overflow-y-auto pr-2 custom-scrollbar max-h-[500px]">
+                
+                {/* ACTIONED Section */}
+                <div className="space-y-1.5">
+                  <div className="text-[10px] text-white/40 uppercase tracking-widest font-black mb-2 border-b border-white/10 pb-1">
+                    Actioned
                   </div>
-                ))}
+                  {currentSetPlayers
+                    .filter(p => ['current', 'sold', 'unsold'].includes(p.status))
+                    .sort((a, b) => (b.auctionedOrder || 0) - (a.auctionedOrder || 0))
+                    .map((player) => (
+                    <div 
+                      key={player.id} 
+                      className={`flex items-center justify-between p-2 rounded transition-all border ${
+                        player.id === currentPlayer.id 
+                          ? 'bg-ipl-gold/10 border-ipl-gold shadow-[0_0_10px_rgba(209,171,62,0.1)] scale-[1.02]' 
+                          : player.status === 'sold'
+                            ? 'bg-green-500/5 border-green-500/20 opacity-80'
+                            : player.status === 'unsold'
+                              ? 'bg-red-500/5 border-red-500/20 opacity-80'
+                              : 'bg-ipl-bg/30 border-white/5'
+                      }`}
+                    >
+                      <div className="flex flex-col min-w-0">
+                        <span className={`text-[10px] font-bold truncate ${player.id === currentPlayer.id ? 'text-white' : 'text-white/70'}`}>
+                          {player.name}
+                        </span>
+                        <span className="text-[8px] font-black uppercase text-white/30 tracking-tighter">
+                          {player.role} • {player.country}
+                        </span>
+                      </div>
+                      
+                      <div className="text-right shrink-0 ml-2">
+                        {player.status === 'sold' ? (
+                          <div className="flex flex-col items-end">
+                            <span className="text-[8px] font-black text-green-500 uppercase tracking-widest">SOLD</span>
+                            <span className="text-[9px] font-mono text-white/60">{formatCurrency(player.soldPrice || 0)}</span>
+                          </div>
+                        ) : player.status === 'unsold' ? (
+                          <span className="text-[8px] font-black text-red-500 uppercase tracking-widest">UNSOLD</span>
+                        ) : (
+                          <div className="flex items-center gap-1">
+                            <div className="w-1.5 h-1.5 rounded-full bg-ipl-gold animate-pulse" />
+                            <span className="text-[8px] font-black text-ipl-gold uppercase">CURRENT</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* STILL IN BAG Section */}
+                <div className="space-y-1.5 pt-4">
+                  <div className="text-[10px] text-white/40 uppercase tracking-widest font-black mb-2 border-b border-white/10 pb-1">
+                    Still in Bag
+                  </div>
+                  {currentSetPlayers.filter(p => p.status === 'upcoming').length === 0 ? (
+                     <div className="text-center text-[10px] text-white/20 italic py-4">Set Complete</div>
+                  ) : (
+                    currentSetPlayers.filter(p => p.status === 'upcoming').map((player) => (
+                      <div 
+                        key={player.id} 
+                        className="flex items-center justify-between p-2 rounded transition-all border bg-ipl-bg/30 border-white/5 opacity-50"
+                      >
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-[10px] font-bold truncate text-white/70">
+                            {player.name}
+                          </span>
+                          <span className="text-[8px] font-black uppercase text-white/30 tracking-tighter">
+                            {player.role} • {player.country}
+                          </span>
+                        </div>
+                        
+                        <div className="text-right shrink-0 ml-2">
+                          <span className="text-[9px] font-mono text-white/20">{formatCurrency(player.basePrice)}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
               </div>
             </div>
           )}

@@ -46,10 +46,10 @@ const TeamsView = ({ teams, players }: TeamsViewProps) => {
               <div className="p-3 bg-ipl-bg/30">
                 {/* Role Breakdown Bar */}
                 <div className="flex h-1.5 w-full bg-white/5 rounded-full overflow-hidden mb-3">
-                  <div className="bg-blue-500 h-full" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('BAT')).length / 10) * 100}%` }} title="Batsmen" />
-                  <div className="bg-red-500 h-full" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('BOWL')).length / 10) * 100}%` }} title="Bowlers" />
-                  <div className="bg-green-500 h-full" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('ALL')).length / 10) * 100}%` }} title="All-rounders" />
-                  <div className="bg-yellow-500 h-full" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('WK')).length / 10) * 100}%` }} title="Wicket-keepers" />
+                  <div className="bg-blue-500 h-full transition-all" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('BAT')).length / 25) * 100}%` }} title="Batsmen" />
+                  <div className="bg-red-500 h-full transition-all" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('BOWL')).length / 25) * 100}%` }} title="Bowlers" />
+                  <div className="bg-green-500 h-full transition-all" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('ALL')).length / 25) * 100}%` }} title="All-rounders" />
+                  <div className="bg-yellow-500 h-full transition-all" style={{ width: `${(teamPlayers.filter(p => p.role?.toUpperCase().includes('WK')).length / 25) * 100}%` }} title="Wicket-keepers" />
                 </div>
 
                 {teamPlayers.length > 0 ? (

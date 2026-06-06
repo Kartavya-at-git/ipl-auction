@@ -11,10 +11,12 @@ interface ReAuctionSetupProps {
   teams: Team[];
   isHost: boolean;
   currentUserUid: string;
+  serverTimeOffset: number;
 }
 
-const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuctionSetupProps) => {
+const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid, serverTimeOffset }: ReAuctionSetupProps) => {
   const [timeLeft, setTimeLeft] = useState(0);
+  const [loading, setLoading] = useState(false);
   const unsoldPlayers = players.filter(p => p.status === 'unsold' || p.status === 'nominated');
   const userTeam = teams.find(t => t.ownerUid === currentUserUid);
 
@@ -22,7 +24,7 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
     if (!room.timerEndTime) return;
 
     const interval = setInterval(() => {
-      const now = Date.now();
+      const now = Date.now() + serverTimeOffset;
       const diff = Math.max(0, Math.floor((room.timerEndTime! - now) / 1000));
       setTimeLeft(diff);
 
@@ -32,7 +34,7 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [room.timerEndTime, isHost]);
+  }, [room.timerEndTime, isHost, serverTimeOffset]);
 
   const toggleNomination = async (player: Player) => {
     if (!userTeam) return;
@@ -60,20 +62,50 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
   };
 
   const handleStartReAuction = async () => {
+    if (loading || room.status !== 're-auction-setup') return;
     const nominatedPlayers = players.filter(p => p.status === 'nominated');
     if (nominatedPlayers.length === 0) return;
 
-    const updates: any = {};
-    updates[`rooms/${room.id}/status`] = 're-auction-active';
-    updates[`rooms/${room.id}/isReAuctionPhase`] = true;
-    updates[`rooms/${room.id}/currentPlayerId`] = nominatedPlayers[0].id;
-    updates[`rooms/${room.id}/timerEndTime`] = Date.now() + (room.settings.timerDuration * 1000);
-    updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
-    updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/status`] = 'current';
-    updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/currentBid`] = nominatedPlayers[0].basePrice;
-    updates[`rooms/${room.id}/players/${nominatedPlayers[0].id}/highestBidderTeamId`] = null;
+    setLoading(true);
+    try {
+      // 1. Shuffle nominated players
+      const shuffled = [...nominatedPlayers].sort(() => Math.random() - 0.5);
+      
+      const updates: any = {};
+      const batchSize = 8;
+      
+      // 2. Assign new Set Numbers and Categories (Sets of 8)
+      shuffled.forEach((player, index) => {
+        const newSetNo = 100 + Math.floor(index / batchSize) + 1;
+        updates[`rooms/${room.id}/players/${player.id}/setNo`] = newSetNo;
+        updates[`rooms/${room.id}/players/${player.id}/category`] = `Accelerated ${newSetNo}`;
+        updates[`rooms/${room.id}/players/${player.id}/status`] = 'upcoming'; // Reset all to upcoming for the new draw
+      });
 
-    await update(ref(db), updates);
+      // 3. Draw the first player from the new Set 1 randomly
+      const firstSetPlayers = shuffled.slice(0, batchSize);
+      const firstPlayer = firstSetPlayers[Math.floor(Math.random() * firstSetPlayers.length)];
+
+      // 4. Start the Engine
+      updates[`rooms/${room.id}/status`] = 're-auction-active';
+      updates[`rooms/${room.id}/isReAuctionPhase`] = true;
+      updates[`rooms/${room.id}/currentPlayerId`] = firstPlayer.id;
+      const nextEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
+      updates[`rooms/${room.id}/timerEndTime`] = nextEndTime;
+      updates[`rooms/${room.id}/auctionNumber`] = room.auctionNumber + 1;
+      
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/status`] = 'current';
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/currentBid`] = firstPlayer.basePrice;
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/highestBidderTeamId`] = null;
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/timerEndTime`] = nextEndTime;
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/auctionedOrder`] = room.auctionNumber + 1;
+
+      await update(ref(db), updates);
+    } catch (err) {
+      console.error("Failed to start re-auction:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -127,7 +159,7 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
             <button
               key={player.id}
               onClick={() => toggleNomination(player)}
-              disabled={!userTeam}
+              disabled={!userTeam || currentUserUid !== userTeam.ownerUid}
               className={`p-4 rounded-xl border transition-all text-left group relative ${
                 isNominatedByMe 
                   ? 'bg-ipl-gold/10 border-ipl-gold shadow-lg' 
@@ -163,7 +195,7 @@ const ReAuctionSetup = ({ room, players, teams, isHost, currentUserUid }: ReAuct
                 </div>
               )}
 
-              {!isNominatedByMe && userTeam && (
+              {!isNominatedByMe && userTeam && currentUserUid === userTeam.ownerUid && (
                 <div className="absolute inset-0 flex items-center justify-center bg-ipl-navy/80 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl">
                   <div className="flex items-center gap-2 text-ipl-gold font-bold text-sm">
                     <UserPlus size={18} />

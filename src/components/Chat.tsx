@@ -46,12 +46,16 @@ const Chat = ({ roomId, currentUserUid, currentUserName, userTeamId, userTeamCol
           <div key={msg.id} className={`flex flex-col ${msg.senderUid === currentUserUid ? 'items-end' : 'items-start'}`}>
             <div className="flex items-center gap-1 mb-1">
               <span className="text-[10px] font-bold text-white/40">{msg.senderName}</span>
-              {msg.teamId && (
+              {msg.teamId ? (
                 <span 
                   className="text-[8px] px-1 rounded font-bold text-white uppercase"
                   style={{ backgroundColor: msg.teamColor || '#333' }}
                 >
                   {msg.teamId}
+                </span>
+              ) : (
+                <span className="text-[8px] px-1 rounded font-bold text-white uppercase bg-gray-600">
+                  Spectator
                 </span>
               )}
             </div>

@@ -12,15 +12,21 @@ interface SetupProps {
   players: Player[];
   isHost: boolean;
   currentUserUid: string;
+  serverTimeOffset: number;
 }
 
-const Setup = ({ room, teams, players, isHost }: SetupProps) => {
+const Setup = ({ room, teams, players, isHost, serverTimeOffset }: SetupProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (players.length > 0) {
+      setError('Player list already exists. Please delete the room and create a new one to re-upload.');
+      return;
+    }
 
     setLoading(true);
     setError('');
@@ -44,13 +50,17 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
         }
         const basePrice = parseFloat(rawPrice) || 0;
 
+        // Robust set number parsing
+        let rawSet = String(row['Set No'] || row['Set No.'] || row['Set Number'] || '0');
+        const setNo = Number(rawSet.replace(/[^\d]/g, '')) || 0;
+
         updates[`rooms/${room.id}/players/${playerId}`] = {
           name: row['Player Name'] || row.Name || row.name || 'Unknown Player',
           basePrice: basePrice,
           role: row.Role || row.role || '',
           country: row.Country || row.country || '',
           category: row.Category || row.category || 'General',
-          setNo: Number(row['Set No'] || row['Set No.'] || row['Set Number'] || 0),
+          setNo: setNo,
           status: 'upcoming',
           currentBid: 0,
           highestBidderTeamId: null,
@@ -70,6 +80,7 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
   };
 
   const handleStartAuction = async () => {
+    if (loading || room.status !== 'setup') return;
     if (players.length === 0) {
       setError('Please upload players first');
       return;
@@ -79,27 +90,36 @@ const Setup = ({ room, teams, players, isHost }: SetupProps) => {
       return;
     }
 
-    const nextEndTime = Date.now() + (room.settings.timerDuration * 1000);
-    
-    // Sort players by Set No then Order
-    const sortedPlayers = [...players].sort((a, b) => {
-      const setA = a.setNo || 0;
-      const setB = b.setNo || 0;
-      if (setA !== setB) return setA - setB;
-      return a.order - b.order;
-    });
+    setLoading(true);
+    setError('');
 
-    const firstPlayer = sortedPlayers[0];
+    try {
+      const nextEndTime = Date.now() + serverTimeOffset + (room.settings.timerDuration * 1000);
+      
+      // Find the first set and pick a random player from it
+      const sortedSets = [...new Set(players.map(p => p.setNo || 0))].sort((a, b) => a - b);
+      const firstSetNo = sortedSets[0];
+      const firstSetPlayers = players.filter(p => (p.setNo || 0) === firstSetNo && p.status === 'upcoming');
+      
+      const firstPlayer = firstSetPlayers[Math.floor(Math.random() * firstSetPlayers.length)] || players[0];
 
-    const updates: any = {};
-    updates[`rooms/${room.id}/status`] = 'active';
-    updates[`rooms/${room.id}/currentPlayerId`] = firstPlayer.id;
-    updates[`rooms/${room.id}/auctionNumber`] = 1;
-    updates[`rooms/${room.id}/players/${firstPlayer.id}/status`] = 'current';
-    updates[`rooms/${room.id}/players/${firstPlayer.id}/currentBid`] = firstPlayer.basePrice;
-    updates[`rooms/${room.id}/players/${firstPlayer.id}/timerEndTime`] = nextEndTime;
+      const updates: any = {};
+      updates[`rooms/${room.id}/status`] = 'active';
+      updates[`rooms/${room.id}/currentPlayerId`] = firstPlayer.id;
+      updates[`rooms/${room.id}/timerEndTime`] = nextEndTime;
+      updates[`rooms/${room.id}/auctionNumber`] = 1;
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/status`] = 'current';
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/currentBid`] = firstPlayer.basePrice;
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/timerEndTime`] = nextEndTime;
+      updates[`rooms/${room.id}/players/${firstPlayer.id}/auctionedOrder`] = 1;
 
-    await update(ref(db), updates);
+      await update(ref(db), updates);
+    } catch (err) {
+      console.error("Failed to start auction:", err);
+      setError("Failed to start auction. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

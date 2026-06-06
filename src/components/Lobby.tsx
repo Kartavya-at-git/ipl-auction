@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Users, ShieldCheck, Play } from 'lucide-react';
 import type { Room, Participant } from '../types';
 import { ref, update } from 'firebase/database';
@@ -10,6 +11,12 @@ interface LobbyProps {
 }
 
 const Lobby = ({ room, participants, isHost }: LobbyProps) => {
+  useEffect(() => {
+    // Preload audio for zero-latency strike during the auction
+    const audio = new Audio('/Gavel-sound-effect.mp3');
+    audio.load();
+  }, []);
+
   const handleStartSetup = async () => {
     const updates: any = {};
     updates[`rooms/${room.id}/status`] = 'setup';

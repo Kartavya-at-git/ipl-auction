@@ -11,6 +11,8 @@ import ReAuctionSetup from '../components/ReAuctionSetup';
 import TeamSelection from '../components/TeamSelection';
 import Summary from './Summary';
 import { Loader2, LogOut, Gavel, Users, Trophy, MessageCircle, X, Info } from 'lucide-react';
+import { ref, onValue, onDisconnect, set } from 'firebase/database';
+import { db } from '../lib/firebase';
 
 const Room = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -23,6 +25,27 @@ const Room = () => {
   const { user, loading: authLoading } = useAuth();
   const { room, players, activePlayer, teams, participants, recentBids, serverTimeOffset, loading: roomLoading } = useRoom(roomId?.toUpperCase() || '');
   
+  // Realtime Presence Heartbeat
+  useEffect(() => {
+    if (user && room?.id) {
+      const userStatusRef = ref(db, `rooms/${room.id}/participants/${user.uid}/isOnline`);
+      const connectedRef = ref(db, '.info/connected');
+      
+      const unsubscribe = onValue(connectedRef, (snap) => {
+        if (snap.val() === true) {
+          const dRef = onDisconnect(userStatusRef);
+          dRef.set(false).then(() => {
+            set(userStatusRef, true);
+          });
+        }
+      });
+
+      return () => {
+        unsubscribe();
+        set(userStatusRef, false).catch(() => {});
+      };
+    }
+  }, [user, room?.id]);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -57,9 +80,10 @@ const Room = () => {
   const isHost = user?.uid === room.hostId;
   const currentParticipant = participants.find(p => p.uid === user?.uid);
   const userTeam = teams.find(t => t.ownerUid === user?.uid);
+  const isSpectator = currentParticipant?.role === 'spectator';
   
   // Show team selection if: not host, room is active/setup, and either no team picked or hasn't clicked continue
-  const showTeamSelection = !isHost && room.status !== 'waiting' && (!userTeam || !hasEnteredAuction);
+  const showTeamSelection = !isHost && !isSpectator && room.status !== 'waiting' && (!userTeam || !hasEnteredAuction);
 
   // Header Component
   const Header = () => (
@@ -93,6 +117,7 @@ const Room = () => {
             </button>
             <button 
               onClick={() => navigate('/')}
+              title="Exit Room"
               className="p-2 text-red-400/60 hover:text-red-400 hover:bg-red-400/10 rounded-full transition-colors"
             >
               <LogOut size={20} />
@@ -179,7 +204,8 @@ const Room = () => {
             teams={teams} 
             players={players} 
             isHost={isHost} 
-            currentUserUid={user?.uid || ''} 
+            currentUserUid={user?.uid || ''}
+            serverTimeOffset={serverTimeOffset}
           />
         )}
 
@@ -190,10 +216,11 @@ const Room = () => {
             teams={teams} 
             isHost={isHost} 
             currentUserUid={user?.uid || ''} 
+            serverTimeOffset={serverTimeOffset}
           />
         )}
 
-        {(room.status === 'active' || room.status === 'paused' || room.status === 're-auction-active') && (
+        {(room.status === 'active' || room.status === 'paused' || room.status === 're-auction-active' || room.status === 'set-break') && (
           <>
             {activeTab === 'auction' ? (
               activePlayer ? (
@@ -202,9 +229,11 @@ const Room = () => {
                   currentPlayer={activePlayer}
                   players={players}
                   teams={teams}
+                  participants={participants}
                   recentBids={recentBids}
                   isHost={isHost}
                   currentUserUid={user?.uid || ''}
+                  currentUserRole={currentParticipant?.role}
                   serverTimeOffset={serverTimeOffset}
                 />
               ) : (
